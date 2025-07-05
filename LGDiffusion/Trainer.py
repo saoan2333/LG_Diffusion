@@ -34,7 +34,7 @@ class Dataset(data.Dataset):
         self.blurry_img = blurry_img
         self.paths = [p for ext in exts for p in Path(f'{folder}').glob(f'**/*.{ext}')]
         if blurry_img:
-            self.folder_recon = folder + '_recon/'
+            self.folder_recon = folder + '_upsample/'
             self.paths_recon = [p for ext in exts for p in Path(f'{self.folder_recon}').glob(f'**/*.{ext}')]
 
         self.transform = transforms.Compose([

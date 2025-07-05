@@ -134,6 +134,7 @@ class Net(nn.Module):
         return self.final_conv(x)
 
 # 模型结构定义
+
 class Diffusion(nn.Module):
     def __init__(
             self,
@@ -146,7 +147,7 @@ class Diffusion(nn.Module):
             image_sizes,
             scale_mul=(1, 1),
             channels=3,
-            timesteps=1000,
+            timesteps=100,
             full_train=False,
             scale_losses=None,
             loss_factor=1,
@@ -236,9 +237,9 @@ class Diffusion(nn.Module):
         # 设定模型的timesteps以及loss类型
         timesteps,  = betas.shape
         self.num_timesteps = int(timesteps)
-        self.num_timesteps_train = []
+        self.num_timesteps_trained = []
         self.num_timesteps_ideal = []
-        self.num_timesteps_train.append(self.num_timesteps)
+        self.num_timesteps_trained.append(self.num_timesteps)
         self.num_timesteps_ideal.append(self.num_timesteps)
         self.loss_type = loss_type
 
@@ -277,11 +278,11 @@ class Diffusion(nn.Module):
                     int(np.argmax(sigma_t > loss_factor * scale_losses[i]))
                 )
                 if full_train:
-                    self.num_timesteps_ideal.append(
+                    self.num_timesteps_trained.append(
                     int(timesteps)
                 )
                 else:
-                    self.num_timesteps_train.append(self.num_timesteps_ideal[i+1])
+                    self.num_timesteps_trained.append(self.num_timesteps_ideal[i+1])
 
 
         # 控制上一尺度的图像在融合进下一尺度前的模糊处理程度,由gammacabs参数控制.
@@ -595,11 +596,11 @@ class Diffusion(nn.Module):
             x_mix = extract(cur_gammas, t, x_start.shape) * x_start + \
                     (1 - extract(cur_gammas, t, x_start.shape)) * x_orig
             x_noisy = self.q_sample(x_start=x_mix, t=t, noise=noise)
-            x_recon = self.denoise_fn(x_noisy, t, s)
+            x_recon = self.denoise_net(x_noisy, t, s)
 
         else:
             x_noisy = self.q_sample(x_start=x_start, t=t, noise=noise)
-            x_recon = self.denoise_fn(x_noisy, t, s)
+            x_recon = self.denoise_net(x_noisy, t, s)
 
         if self.loss_type == 'l1':
             loss = (noise - x_recon).abs().mean()
@@ -630,7 +631,7 @@ class Diffusion(nn.Module):
             device = x_orig.device
             img_size = self.image_sizes[s]
             assert h == img_size[0] and w == img_size[1], f'height and width of image must be {img_size}'
-            t = torch.randint(0, self.num_timesteps_train[s], (b,), device=device).long()
+            t = torch.randint(0, self.num_timesteps_trained[s], (b,), device=device).long()
             return self.p_losses(x_recon, t, s, x_orig=x_orig, *args, **kwargs)
 
         else:
@@ -639,5 +640,5 @@ class Diffusion(nn.Module):
             device = x[0].device
             img_size = self.image_sizes[s]
             assert h == img_size[0] and w == img_size[1], f'height and width of image must be {img_size}'
-            t = torch.randint(0, self.num_timesteps_train[s], (b,), device=device).long()
+            t = torch.randint(0, self.num_timesteps_trained[s], (b,), device=device).long()
             return self.p_losses(x[0], t, s, *args, **kwargs)

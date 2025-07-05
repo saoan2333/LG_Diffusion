@@ -7,11 +7,11 @@ from LGDiffusion.Functions import muti_scales_img
 from LGDiffusion.Model import Net, Diffusion
 from LGDiffusion.Trainer import MutiScaleTrainer
 from text2live_util.clip_extractor import ClipExtractor
-
+# python main.py --scope pyramids --mode train --dataset_folder ./datasets/pyramids/ --image_name pyramids.png --results_folder ./results/
 def main():
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mark", help='choose training mark num.', default='output')
+    parser.add_argument("--scope", help='choose training mark num.', default='output')
     parser.add_argument("--mode", help='choose mode: train, sample, clip_content, clip_style_gen, clip_style_trans, clip_roi, harmonization, style_transfer, roi')
     parser.add_argument("--input_image", help='content image for style transfer or harmonization.',
                         default='seascape_composite_dragon.png')
