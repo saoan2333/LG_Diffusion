@@ -16,13 +16,15 @@ from skimage.exposure import match_histograms
 from text2live_util.util import get_augmentations_template
 from tqdm import tqdm
 
-# 待更新
-try:
-    from apex import amp
+# from Functions import AMP
 
-    APEX_AVAILABLE = True
-except:
-    APEX_AVAILABLE = False
+# # 待更新
+# try:
+#     from torch.cuda import amp
+#
+#     AMP_AVAILABLE = True
+# except:
+#     AMP_AVAILABLE = False
 
 
 # 数据集class， datasets
@@ -62,7 +64,7 @@ class MutiScaleTrainer(object):
             ms_diffusion_model,
             folder,
             *,
-            ema_decay=0.995,
+            ema_decay=0.9999,
             n_scales=None,
             scale_factor=1,
             image_sizes=None,
@@ -87,7 +89,7 @@ class MutiScaleTrainer(object):
             self.sched_milestones = sched_milestones
         if image_sizes is None:
             image_sizes = []
-        self.model = ms_diffusion_model
+        self.model = ms_diffusion_model.to(device)
         self.ema = EMA(ema_decay)
         self.ema_model = copy.deepcopy(self.model)
         self.update_ema_every = update_ema_every
@@ -123,6 +125,8 @@ class MutiScaleTrainer(object):
                 self.data_list.append(
                     (next(self.dl_list[i]).to(self.device), next(self.dl_list[i]).to(self.device)))
 
+        self.fp16 = fp16
+        self.amp = AMP(self.model, self.fp16)
         self.opt = Adam(ms_diffusion_model.parameters(), lr=train_lr)
 
         self.scheduler = MultiStepLR(self.opt, milestones=self.sched_milestones, gamma=0.5)
@@ -133,12 +137,10 @@ class MutiScaleTrainer(object):
         self.avg_t = []
 
         # 待更新
-        assert not fp16 or fp16 and APEX_AVAILABLE, 'Apex must be installed in order for mixed precision training to be turned on'
-
-        self.fp16 = fp16
-        if fp16:
-            (self.model, self.ema_model), self.opt = amp.initialize([self.model, self.ema_model], self.opt,
-                                                                    opt_level='O1')
+        # assert not fp16 or fp16 and APEX_AVAILABLE, 'Apex must be installed in order for mixed precision training to be turned on'
+        # if fp16:
+        #     (self.model, self.ema_model), self.opt = amp.initialize([self.model, self.ema_model], self.opt,
+        #                                                             opt_level='O1')
 
         self.reset_parameters()
 
@@ -180,7 +182,7 @@ class MutiScaleTrainer(object):
 
 
     def train(self):
-        backwards = partial(loss_backwards, self.fp16)
+        # backwards = partial(loss_backwards, self.fp16)
         loss_avg = 0
         s_weights = torch.tensor(self.model.num_timesteps_trained, device=self.device, dtype=torch.float)
 
@@ -189,16 +191,23 @@ class MutiScaleTrainer(object):
             s = torch.multinomial(input=s_weights, num_samples=1)
             for i in range(self.gradient_accumulate_every):
                 data = self.data_list[s]
-                loss = self.model(data, s)
+                with self.amp.autocast():
+                    loss = self.model(data, s)
+                # loss = self.model(data, s)
                 loss_avg = loss_avg + loss.item()
-                backwards(loss / self.gradient_accumulate_every, self.opt)
+                # backwards(loss / self.gradient_accumulate_every, self.opt)
+                self.amp.backward(loss, self.opt, accumulate_grad=self.gradient_accumulate_every)
+
 
             if self.step % self.avg_window == 0:
                 print(f'step:{self.step} loss:{loss_avg/self.avg_window}')
                 self.running_loss.append(loss_avg/self.avg_window)
                 loss_avg = 0
-            self.opt.step()
+
+            self.amp.step(self.opt)
             self.opt.zero_grad()
+            # self.opt.step()
+            # self.opt.zero_grad()
 
             # 更新EMA
             if self.step % self.update_ema_every == 0:

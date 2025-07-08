@@ -11,14 +11,17 @@ from text2live_util.clip_extractor import ClipExtractor
 def main():
 
     parser = argparse.ArgumentParser()
+
     parser.add_argument("--scope", help='choose training mark num.', default='output')
     parser.add_argument("--mode", help='choose mode: train, sample, clip_content, clip_style_gen, clip_style_trans, clip_roi, harmonization, style_transfer, roi')
     parser.add_argument("--input_image", help='content image for style transfer or harmonization.',
                         default='seascape_composite_dragon.png')
     parser.add_argument("--start_t_harm", help='default=5, starting T at last scale for harmonization', default=5, type=int)
     parser.add_argument("--start_t_style", help='default=15, starting T at last scale for style transfer', default=15, type=int)
+
     # 图像嵌入（harmonization）时需要的输入，融合图像的掩码mask
     parser.add_argument("--harm_mask", help='harmonization mask.', default='seascape_mask_dragon.png')
+
     # CLIP指导时需要输入的参数。可删除，只保留ROI
     parser.add_argument("--clip_text", help='enter CLIP text.', default='Fire in the Forest')
     parser.add_argument("--fill_factor",
@@ -39,9 +42,13 @@ def main():
     # diffusion params
     parser.add_argument("--scale_factor", help='downscaling step for each scale.', default=1.411, type=float)
 
+    # 混合精度AMP
+    parser.add_argument("--AMP", help='Automatically Mixed Precision, default = False, True/False.', action="store_true")
+
     # training params
     # 总时间步
     parser.add_argument("--timesteps", help='total diffusion timesteps.', default=100, type=int)
+
     # 训练步数
     parser.add_argument("--train_num_steps", help='total training steps.', default=1, type=int)
     parser.add_argument("--train_batch_size", help='batch size during training.', default=32, type=int)
@@ -49,6 +56,7 @@ def main():
     parser.add_argument("--save_and_sample_every", help='n. steps for checkpointing model.', default=10, type=int)
     parser.add_argument("--avg_window", help='window size for averaging loss (visualization only).', default=100, type=int)
     parser.add_argument("--train_lr", help='starting lr.', default=1e-3, type=float)
+
     # 学习率在t*1000步后会下降的机制
     parser.add_argument("--sched_k_milestones", nargs="+", help='lr scheduler steps x 1000.',
                         default=[20, 40, 70, 80, 90, 110], type=int)
@@ -132,7 +140,7 @@ def main():
         ema_decay=0.9999,
 
         # 混合精度
-        fp16=False,
+        fp16=args.AMP,
         save_and_sample_every=args.save_and_sample_every,
         avg_window=args.avg_window,
         sched_milestones=sched_milestones,

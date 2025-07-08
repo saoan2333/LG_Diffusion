@@ -6,27 +6,54 @@ from PIL import Image
 from pathlib import Path
 
 # 混合精度 Mixed Precision,这是旧版apex的amp,待更新!!!!!!!!!!!
-try:
-    from apex import amp
-    APEX_AVAILABLE = True
-except:
-    APEX_AVAILABLE = False
-
-# 混合精度 Mixed Precision， torch.cuda.amp版
 # try:
 #     from torch.cuda import amp
 #     AMP_AVAILABLE = True
-#     amp_scaler = amp.GradScaler()
 # except:
 #     AMP_AVAILABLE = False
 
+
 # 混合精度下（FP16）的loss反向传播, amp机制待更新！！！！！！！！！！！
-def loss_backwards(fp16, loss, optimizer, **kwargs):
-    if fp16:
-        with amp.scale_loss(loss, optimizer) as scaled_loss:
-            scaled_loss.backward(**kwargs)
-    else:
-        loss.backward(**kwargs)
+# def loss_backwards(fp16, loss, optimizer, **kwargs):
+#     if fp16:
+#         with amp.scale_loss(loss, optimizer) as scaled_loss:
+#             scaled_loss.backward(**kwargs)
+#     else:
+#         loss.backward(**kwargs)
+
+from functools import partial
+from contextlib import contextmanager
+
+class AMP:
+    def __init__(self, model , fp16):
+        self.model = model
+        self.fp16 = fp16 and torch.cuda.is_available()
+        if self.fp16:
+            self.autocast = partial(torch.amp.autocast, device_type="cuda")
+            self.scaler = torch.amp.GradScaler(enabled=True)
+
+        else:
+            self.autocast = _dummy_cm
+            self.scaler = torch.amp.GradScaler(enabled=False)
+        # self.autocast = torch.amp.autocast if self.fp16 else _dummy_cm
+        # self.scaler = torch.amp.GradScaler(enabled=self.fp16)
+
+    def backward(self, loss, optimizer, *,  accumulate_grad = 1, **kwargs):
+        loss = loss / accumulate_grad
+        self.scaler.scale(loss).backward(**kwargs)
+
+    def step(self, optimizer):
+        if not self.fp16:
+            optimizer.step()
+        else:
+            self.scaler.step(optimizer)
+            self.scaler.update()
+
+# 空过函数
+@contextmanager
+def _dummy_cm():
+    yield
+
 
 # 掩码预处理(扩张边缘+高斯平滑）
 def mask_preprocess(mask, mode):
