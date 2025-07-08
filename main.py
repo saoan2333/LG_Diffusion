@@ -7,12 +7,12 @@ from LGDiffusion.Functions import muti_scales_img
 from LGDiffusion.Model import Net, Diffusion
 from LGDiffusion.Trainer import MutiScaleTrainer
 from text2live_util.clip_extractor import ClipExtractor
-# python main.py --scope pyramids --mode train --dataset_folder ./datasets/pyramids/ --image_name pyramids.png --results_folder ./results/
+# python main.py  --mode train --timesteps 10 --train_num_steps 10 --AMP
 def main():
 
     parser = argparse.ArgumentParser()
 
-    parser.add_argument("--scope", help='choose training mark num.', default='output')
+    parser.add_argument("--scope", help='choose training mark num.', default='pyramids')
     parser.add_argument("--mode", help='choose mode: train, sample, clip_content, clip_style_gen, clip_style_trans, clip_roi, harmonization, style_transfer, roi')
     parser.add_argument("--input_image", help='content image for style transfer or harmonization.',
                         default='seascape_composite_dragon.png')
@@ -32,8 +32,8 @@ def main():
     parser.add_argument("--roi_n_tar", help='Defines the number of target ROIs in the new image.', default=1, type=int)
 
     # Dataset
-    parser.add_argument("--dataset_folder", help='choose dataset folder.', default='./datasets/forest/')
-    parser.add_argument("--image_name", help='choose image name.', default='forest.jpeg')
+    parser.add_argument("--dataset_folder", help='choose dataset folder.', default='./datasets/pyramids/')
+    parser.add_argument("--image_name", help='choose image name.', default='pyramids.png')
     parser.add_argument("--results_folder", help='choose results folder.', default='./results/')
 
     # Net
