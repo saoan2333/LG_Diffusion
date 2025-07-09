@@ -242,6 +242,8 @@ class MutiScaleTrainer(object):
     ):
         if desc is None:
             desc = f'sample_{str(datetime.datetime.now()).replace(":", "_")}'
+        if self.n_scales == 1 and (custom_t_list is None or len(custom_t_list) == 0):
+            custom_t_list = []
         if self.ema_model.reblurring:
             desc = desc + '_rblr'
         if self.ema_model.sample_limited_t:

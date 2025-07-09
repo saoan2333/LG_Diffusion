@@ -7,7 +7,7 @@ from LGDiffusion.Functions import muti_scales_img
 from LGDiffusion.Model import Net, Diffusion
 from LGDiffusion.Trainer import MutiScaleTrainer
 from text2live_util.clip_extractor import ClipExtractor
-# python main.py  --mode train --timesteps 10 --train_num_steps 10 --AMP
+# python main.py  --mode train --timesteps 10 --train_num_steps 10 --AMP --SinScale
 def main():
 
     parser = argparse.ArgumentParser()
@@ -44,6 +44,9 @@ def main():
 
     # 混合精度AMP
     parser.add_argument("--AMP", help='Automatically Mixed Precision, default = False, True/False.', action="store_true")
+
+    # 单尺度训练
+    parser.add_argument("--SinScale", help='Enable SinSacle Mode default = False, True/False.', action="store_true")
 
     # training params
     # 总时间步
@@ -90,11 +93,12 @@ def main():
                                                                                   scale_factor=args.scale_factor,
                                                                                   create=True,
                                                                                   auto_scale=50000, # limit max number of pixels in image
+                                                                                  single_scale=args.SinScale
                                                                                   )
 
     model = Net(
         dim=args.dim,
-        multiscale=True,
+        multiscale=not args.SinScale,
         device=device,
     )
     model.to(device)

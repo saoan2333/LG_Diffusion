@@ -43,7 +43,7 @@ class SinusoidalPositionalEncoding(nn.Module):
 # 卷积块定义（ConvBlock）
 # 将时间信息（time_emb）通过广播加法调制到了原有的通道特征中。
 class ConvbBlock(nn.Module):
-    def __init__(self, dim, dim_out, *, time_emb_dim=None, mult=1):
+    def __init__(self, dim, dim_out, *, time_emb_dim=None, mult=1, small_rf = False):
         super().__init__()
         self.mlp = nn.Sequential(
             nn.GELU(),
@@ -51,12 +51,21 @@ class ConvbBlock(nn.Module):
         )if exists(time_emb_dim) else None
 
         self.time_reshape = nn.Conv2d(time_emb_dim, dim, kernel_size=1)
-        self.deep_conv = nn.Conv2d(dim, dim, kernel_size=5, padding=2, groups=dim)
+        # self.deep_conv = nn.Conv2d(dim, dim, kernel_size=5, padding=2, groups=dim)
+        # self.net = nn.Sequential(
+        #     nn.Conv2d(dim, dim_out*mult, kernel_size=3, padding=1),
+        #     nn.GELU(),
+        #     nn.Conv2d(dim_out*mult, dim_out, kernel_size=3, padding=1)
+        # )
+        k_deep = 3 if small_rf else 5
+        k_main = 1 if small_rf else 3
+        self.deep_conv = nn.Conv2d(dim, dim, kernel_size=k_deep, padding=k_deep // 2, groups=dim)
         self.net = nn.Sequential(
-            nn.Conv2d(dim, dim_out*mult, kernel_size=3, padding=1),
+            nn.Conv2d(dim, dim_out*mult, kernel_size=k_main, padding=k_main // 2),
             nn.GELU(),
-            nn.Conv2d(dim_out*mult, dim_out, kernel_size=3, padding=1)
+            nn.Conv2d(dim_out*mult, dim_out, kernel_size=k_main, padding=k_main // 2)
         )
+
         self.res_conv = nn.Conv2d(dim, dim_out, kernel_size=1) if dim != dim_out else nn.Identity()
 
     def forward(self, x, time_emb=None):
@@ -104,11 +113,12 @@ class Net(nn.Module):
             self.time_mlp = None
 
         half_dim = int(dim / 2)
+        small_rf = not multiscale
 
-        self.l1 = ConvbBlock(channels, half_dim, time_emb_dim=time_dim)
-        self.l2 = ConvbBlock(half_dim, dim, time_emb_dim=time_dim)
-        self.l3 = ConvbBlock(dim, dim, time_emb_dim=time_dim)
-        self.l4 = ConvbBlock(dim, half_dim, time_emb_dim=time_dim)
+        self.l1 = ConvbBlock(channels, half_dim, time_emb_dim=time_dim, small_rf = small_rf)
+        self.l2 = ConvbBlock(half_dim, dim, time_emb_dim=time_dim, small_rf = small_rf)
+        self.l3 = ConvbBlock(dim, dim, time_emb_dim=time_dim, small_rf = small_rf)
+        self.l4 = ConvbBlock(dim, half_dim, time_emb_dim=time_dim, small_rf = small_rf)
 
         out_dim = default(out_dim, channels)
         self.final_conv = nn.Sequential(
@@ -116,7 +126,7 @@ class Net(nn.Module):
         )
 
     def forward(self, x, time, scale=None):
-        if exists(self.multiscale):
+        if self.multiscale:
             scale_tensor = torch.ones(size=time.shape).to(device=self.device) * scale
             t = self.TimeEmb(time)
             s = self.ScaleEmb(scale_tensor)
@@ -367,7 +377,7 @@ class Diffusion(nn.Module):
     def p_mean_variance(self, x, t, s, clip_denoised:bool):
         pred_noise = self.denoise_net(x, t, scale=s)
         x_recon, x_t_mix = self.predict_start_from_noise(x, t=t, s=s, noise=pred_noise)
-        cur_gammas = self.gammas[s - 1].reshape(-1).clamp(0, 0.55)
+        # cur_gammas = self.gammas[s - 1].reshape(-1).clamp(0, 0.55)
 
         if self.save_history:
             final_results_folder = Path(str(self.output_folder / f'mid_samples_scale_{s}'))
@@ -444,6 +454,7 @@ class Diffusion(nn.Module):
 
         # 无引导采样
         if int(s) > 0 and t[0] > 0 and self.reblurring:
+            cur_gammas = self.gammas[s - 1].reshape(-1).clamp(0, 0.55)
             x_tm1_mix = extract(cur_gammas, t - 1, x_recon.shape) * self.img_prev_upsample + \
                         (1 - extract(cur_gammas, t - 1, x_recon.shape)) * x_recon
         else:

@@ -1,4 +1,5 @@
 import torch
+from setuptools.sandbox import save_path
 from skimage import morphology, filters
 from inspect import isfunction
 import numpy as np
@@ -166,9 +167,9 @@ def cosine_beta_schedule(timesteps, s=0.008):
     return np.clip(betas, a_min=0, a_max=0.999)
 
 # 多尺度下的图像金字塔机制+不同尺度下的信息丢失率评估
-def muti_scales_img(foldername, filename, scale_factor = 1.411, image_size = None, create = False, auto_scale = None):
+def muti_scales_img(foldername, filename, scale_factor = 1.411, image_size = None, create = False, auto_scale = None, single_scale = False):
     # 获取img_size
-    orig_img = Image.open(foldername+filename)
+    orig_img = Image.open(foldername + filename)
     filename = filename.rsplit( ".", 1 )[ 0 ] + '.png'
     if image_size is None:
         # 直接用原图的size
@@ -183,6 +184,13 @@ def muti_scales_img(foldername, filename, scale_factor = 1.411, image_size = Non
     downscaled_img = []
     upsample_images = []
     rescale_loss = []
+
+    if single_scale:
+        if create:
+            save_path = foldername + 'scale_0/'
+            Path(save_path).mkdir(parents = True, exist_ok = True)
+            orig_img.save(save_path + filename.rsplit( ".", 1 )[ 0 ] + '.png')
+        return [image_size], [0, 0], 1.0, 1
 
     # 模型的感受野为：Receptive Field， 简写为rf_net
     # rf_net = 35，意思是网络的某一层最终每个输出像素，受输入图像上一个35×35的区域影响。
