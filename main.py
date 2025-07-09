@@ -9,7 +9,7 @@ from LGDiffusion.Functions import muti_scales_img
 from LGDiffusion.Model import Net, Diffusion
 from LGDiffusion.Trainer import MutiScaleTrainer
 from text2live_util.clip_extractor import ClipExtractor
-# python main.py  --mode train --timesteps 10 --train_num_steps 10 --avg_window 1 --save_and_sample_every 5 --AMP --SinScale
+# python main.py  --mode train --timesteps 10 --train_num_steps 10 --avg_window 1 --save_and_sample_every 5 --AMP --SinScale --step_start_ema 10
 def main():
 
     parser = argparse.ArgumentParser()
