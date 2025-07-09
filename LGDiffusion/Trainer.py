@@ -75,7 +75,7 @@ class MutiScaleTrainer(object):
             fp16=False,
             step_start_ema=2000,
             update_ema_every=10,
-            save_and_sample_every=25000,
+            save_and_sample_every=250,
             avg_window=100,
             sched_milestones=None,
             results_folder='./results',
@@ -151,7 +151,7 @@ class MutiScaleTrainer(object):
         if self.step < self.step_start_ema:
             self.reset_parameters()
             return
-        self.ema.update_params(self.ema_model, self.model)
+        self.ema.update_model(self.ema_model, self.model)
 
     def save(self, milestone):
         data = {

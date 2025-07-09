@@ -3,11 +3,13 @@ import numpy as np
 import argparse
 import os
 import torchvision
+from fsspec.registry import default
+
 from LGDiffusion.Functions import muti_scales_img
 from LGDiffusion.Model import Net, Diffusion
 from LGDiffusion.Trainer import MutiScaleTrainer
 from text2live_util.clip_extractor import ClipExtractor
-# python main.py  --mode train --timesteps 10 --train_num_steps 10 --AMP --SinScale
+# python main.py  --mode train --timesteps 10 --train_num_steps 10 --avg_window 1 --save_and_sample_every 5 --AMP --SinScale
 def main():
 
     parser = argparse.ArgumentParser()
@@ -48,6 +50,8 @@ def main():
     # 单尺度训练
     parser.add_argument("--SinScale", help='Enable SinSacle Mode default = False, True/False.', action="store_true")
 
+    # ema_start_step
+    parser.add_argument("--step_start_ema", help='start step ema.', default=2000, type=int)
     # training params
     # 总时间步
     parser.add_argument("--timesteps", help='total diffusion timesteps.', default=100, type=int)
@@ -121,7 +125,7 @@ def main():
         device=device,
         reblurring=True,
         sample_limited_t=args.sample_limited_t,
-        omega=args.omega
+        omega=args.omega,
     ).to(device)
 
     if args.sample_t_list is None:
@@ -139,6 +143,7 @@ def main():
         train_lr=args.train_lr,
         train_num_steps=args.train_num_steps,
         gradient_accumulate_every=args.grad_accumulate,
+        step_start_ema=args.step_start_ema,
 
         # ema衰减率
         ema_decay=0.9999,
