@@ -151,7 +151,7 @@ class MutiScaleTrainer(object):
         if self.step < self.step_start_ema:
             self.reset_parameters()
             return
-        self.ema.update_params(self.ema_model, self.model)
+        self.ema.update_model(self.ema_model, self.model)
 
     def save(self, milestone):
         data = {
