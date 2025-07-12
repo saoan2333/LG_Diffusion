@@ -51,20 +51,21 @@ class ConvbBlock(nn.Module):
         )if exists(time_emb_dim) else None
 
         self.time_reshape = nn.Conv2d(time_emb_dim, dim, kernel_size=1)
-        # self.deep_conv = nn.Conv2d(dim, dim, kernel_size=5, padding=2, groups=dim)
-        # self.net = nn.Sequential(
-        #     nn.Conv2d(dim, dim_out*mult, kernel_size=3, padding=1),
-        #     nn.GELU(),
-        #     nn.Conv2d(dim_out*mult, dim_out, kernel_size=3, padding=1)
-        # )
-        k_deep = 3 if small_rf else 5
-        k_main = 1 if small_rf else 3
-        self.deep_conv = nn.Conv2d(dim, dim, kernel_size=k_deep, padding=k_deep // 2, groups=dim)
+        self.deep_conv = nn.Conv2d(dim, dim, kernel_size=5, padding=2, groups=dim)
         self.net = nn.Sequential(
-            nn.Conv2d(dim, dim_out*mult, kernel_size=k_main, padding=k_main // 2),
+            nn.Conv2d(dim, dim_out*mult, kernel_size=3, padding=1),
             nn.GELU(),
-            nn.Conv2d(dim_out*mult, dim_out, kernel_size=k_main, padding=k_main // 2)
+            nn.Conv2d(dim_out*mult, dim_out, kernel_size=3, padding=1)
         )
+
+        # k_deep = 3 if small_rf else 5
+        # k_main = 1 if small_rf else 3
+        # self.deep_conv = nn.Conv2d(dim, dim, kernel_size=k_deep, padding=k_deep // 2, groups=dim)
+        # self.net = nn.Sequential(
+        #     nn.Conv2d(dim, dim_out*mult, kernel_size=k_main, padding=k_main // 2),
+        #     nn.GELU(),
+        #     nn.Conv2d(dim_out*mult, dim_out, kernel_size=k_main, padding=k_main // 2)
+        # )
 
         self.res_conv = nn.Conv2d(dim, dim_out, kernel_size=1) if dim != dim_out else nn.Identity()
 
