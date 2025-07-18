@@ -6,7 +6,7 @@ import torchvision
 from fsspec.registry import default
 
 from LGDiffusion.Functions import muti_scales_img
-from LGDiffusion.Model import Net, Diffusion
+from LGDiffusion.Model import Net, Diffusion, UNet
 from LGDiffusion.Trainer import MutiScaleTrainer
 from text2live_util.clip_extractor import ClipExtractor
 # python main.py  --mode train --timesteps 10 --train_num_steps 10 --avg_window 1 --save_and_sample_every 5 --AMP --SinScale --step_start_ema 10
@@ -93,6 +93,7 @@ def main():
     # 保存中间的数据
     save_interm = False
 
+    # rescale_losses 是损失缩放因子，避免误差累计的手段之一（通过缩放大尺度时的图片损失来缓解）
     sizes, rescale_losses, scale_factor, n_scales = muti_scales_img(args.dataset_folder, args.image_name,
                                                                                   scale_factor=args.scale_factor,
                                                                                   create=True,
@@ -100,10 +101,17 @@ def main():
                                                                                   single_scale=args.SinScale
                                                                                   )
 
-    model = Net(
-        dim=args.dim,
-        multiscale=not args.SinScale,
-        device=device,
+    # model = Net(
+    #     dim=args.dim,
+    #     multiscale=not args.SinScale,
+    #     device=device,
+    # )
+    # model.to(device)
+
+    model = UNet(
+        model_channels=160,
+        in_channels=3,
+        num_classes=3,
     )
     model.to(device)
 
