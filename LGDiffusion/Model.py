@@ -308,7 +308,7 @@ class UNet(nn.Module):
     #     self.input_blocks.apply(convert_module_to_f32)
     #     self.output_blocks.apply(convert_module_to_f32)
 
-    def forward(self, x, timesteps, y=None):
+    def forward(self, x, timesteps, scale=None, y=None):
 
         hs = []
         emb = self.time_embed(timestep_embedding(timesteps, self.model_channels))
