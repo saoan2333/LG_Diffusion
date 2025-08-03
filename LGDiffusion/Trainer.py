@@ -171,6 +171,8 @@ class MutiScaleTrainer(object):
         plt.savefig(str(self.results_folder / 'running_loss'))
         plt.clf()
 
+        np.save(str(self.results_folder / 'running_loss.npy'), data['running_loss'])
+
     def load(self, milestone):
         data = torch.load(str(self.results_folder / f'model-{milestone}.pt'), map_location=self.device)
 
