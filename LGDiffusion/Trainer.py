@@ -167,7 +167,9 @@ class MutiScaleTrainer(object):
 
         plt.plot(self.running_loss)
         plt.grid(True)
-        plt.ylim((0, 0.2))
+        plt.xlabel('Averaging Step Index (each = avg_window steps)')
+        plt.ylabel('Average Loss')
+        # plt.ylim((0, 0.2))
         plt.savefig(str(self.results_folder / 'running_loss'))
         plt.clf()
 
