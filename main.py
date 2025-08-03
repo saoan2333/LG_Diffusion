@@ -4,7 +4,7 @@ import argparse
 import os
 import torchvision
 from LGDiffusion.Functions import muti_scales_img
-from LGDiffusion.Model import Net, Diffusion
+from LGDiffusion.Model import UNet, Net, Diffusion
 from LGDiffusion.Trainer import MutiScaleTrainer
 from text2live_util.clip_extractor import ClipExtractor
 # python main.py  --mode train --timesteps 10 --train_num_steps 10 --AMP --SinScale
@@ -96,10 +96,15 @@ def main():
                                                                                   single_scale=args.SinScale
                                                                                   )
 
-    model = Net(
-        dim=args.dim,
-        multiscale=not args.SinScale,
-        device=device,
+    # model = Net(
+    #     dim=args.dim,
+    #     multiscale=not args.SinScale,
+    #     device=device,
+    # )
+    # model.to(device)
+
+    model = UNet(
+        model_channels=args.dim,
     )
     model.to(device)
 
