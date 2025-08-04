@@ -219,6 +219,10 @@ def muti_scales_img(foldername, filename, scale_factor = 1.411, image_size = Non
     for i in range(n_scales):
         current_img_size = (int(round(image_size[0] / np.power(scale_factor, n_scales - i - 1))),
                             int(round(image_size[1] / np.power(scale_factor, n_scales - i - 1))))
+        current_img_size = (
+            8 * (current_img_size[0] // 8),
+            8 * (current_img_size[1] // 8)
+        )
         current_img = orig_img.resize(current_img_size, Image.Resampling.LANCZOS)
         save_path = foldername + 'scale_' + str(i) + '/'
         if create:
@@ -491,6 +495,14 @@ def timestep_embedding(timesteps, dim, max_period=10000):
         embedding = torch.cat([embedding, torch.zeros_like(embedding[:, :1])], dim=-1)
     return embedding
 
+def pad_to_multiple(img: torch.Tensor, mult: int = 8, mode: str = "reflect") -> torch.Tensor:
+    *_, h, w = img.shape
+    pad_h = (mult - h % mult) % mult
+    pad_w = (mult - w % mult) % mult
+    if pad_h == 0 and pad_w == 0:
+        return img
+    pad = (0, pad_w, 0, pad_h)
+    return F.pad(img, pad, mode=mode)
 
 
 

@@ -55,8 +55,16 @@ class Dataset(data.Dataset):
         if self.blurry_img:
             path_recon = self.paths_recon[0]
             img_recon = Image.open(path_recon).convert('RGB')
-            return self.transform(img), self.transform(img_recon)
-        return self.transform(img)
+
+        img = self.transform(img)
+        img = pad_to_multiple(img, 8)
+
+        if self.blurry_img:
+            img_recon = self.transform(img_recon)
+            img_recon = pad_to_multiple(img_recon, 8)
+            return img, img_recon
+
+        return img
 
 class MutiScaleTrainer(object):
     def __init__(
@@ -267,6 +275,7 @@ class MutiScaleTrainer(object):
             scale_0_size = (
                 int(self.model.image_sizes[custom_image_size_idxs[0]][0] * scale_mul[0]),
                 int(self.model.image_sizes[custom_image_size_idxs[0]][1] * scale_mul[1]))
+            scale_0_size = (8 * (scale_0_size[0] // 8), 8 * (scale_0_size[1] // 8))
         else:
             scale_0_size = None
         t_list = [self.ema_model.num_timesteps_trained[0]] + custom_t_list
