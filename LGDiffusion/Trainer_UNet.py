@@ -9,7 +9,7 @@ from mpi4py import MPI
 import numpy as np
 import cv2
 from torch.utils.data import DataLoader, Dataset
-from Functions import *
+from LGDiffusion.Functions import *
 from torch.optim import AdamW
 import copy
 from . import logger, dist_util

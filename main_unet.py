@@ -10,10 +10,10 @@ from LGDiffusion.Functions import muti_scales_img, adjust_scales2image, create_m
     model_and_diffusion_defaults, create_named_schedule_sampler, add_dict_to_argparser, classifier_defaults
 from LGDiffusion.Model import UNet, Net, Diffusion
 from LGDiffusion.Trainer import MutiScaleTrainer
-from .LGDiffusion import logger, dist_util
+from LGDiffusion import logger, dist_util
 from PIL import Image
 import torchvision as tv
-from .LGDiffusion.Trainer_UNet import load_data, TrainLoop
+from LGDiffusion.Trainer_UNet import load_data, TrainLoop
 from text2live_util.clip_extractor import ClipExtractor
 # python main.py  --mode train --timesteps 10 --train_num_steps 10 --AMP --SinScale
 def main():
