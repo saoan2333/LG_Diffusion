@@ -1,11 +1,19 @@
+import math
+import torch.distributed as dist
+
 import torch
 import numpy as np
 import argparse
 import os
 import torchvision
-from LGDiffusion.Functions import muti_scales_img
+from LGDiffusion.Functions import muti_scales_img, adjust_scales2image, create_model_and_diffusion, args_to_dict, \
+    model_and_diffusion_defaults, create_named_schedule_sampler, add_dict_to_argparser, classifier_defaults
 from LGDiffusion.Model import UNet, Net, Diffusion
 from LGDiffusion.Trainer import MutiScaleTrainer
+from .LGDiffusion import logger, dist_util
+from PIL import Image
+import torchvision as tv
+from .LGDiffusion.Trainer_UNet import load_data, TrainLoop
 from text2live_util.clip_extractor import ClipExtractor
 # python main.py  --mode train --timesteps 10 --train_num_steps 10 --AMP --SinScale
 def main():
@@ -94,81 +102,166 @@ def main():
                                                                                   create=True,
                                                                                   auto_scale=50000, # limit max number of pixels in image
                                                                                   single_scale=args.SinScale
-                                                                                  )
-
-    model = UNet(
-        model_channels=args.dim,
-    )
-    model.to(device)
-
-    diffusion = Diffusion(
-        denoise_net=model,
-        save_history=save_interm,
-        output_folder=results_folder,
-        n_scales=n_scales,
-        scale_factor=scale_factor,
-        image_sizes=sizes,
-        scale_mul=scale_mul,
-        channels=3,
-        timesteps=args.timesteps,
-        full_train=True,
-        scale_losses=rescale_losses,
-        loss_factor=args.loss_factor,
-        loss_type='l1',
-        betas=None,
-        device=device,
-        reblurring=True,
-        sample_limited_t=args.sample_limited_t,
-        omega=args.omega
-    ).to(device)
-
-    if args.sample_t_list is None:
-        sample_t_list = diffusion.num_timesteps_ideal[1:]
-    else:
-        sample_t_list = args.sample_t_list
-
-    ScalerTrainer = MutiScaleTrainer(
-        diffusion,
-        folder=args.dataset_folder,
-        n_scales=n_scales,
-        scale_factor=scale_factor,
-        image_sizes=sizes,
-        train_batch_size=args.train_batch_size,
-        train_lr=args.train_lr,
-        train_num_steps=args.train_num_steps,
-        gradient_accumulate_every=args.grad_accumulate,
-
-        # ema衰减率
-        ema_decay=0.9999,
-
-        # 混合精度
-        fp16=args.AMP,
-        save_and_sample_every=args.save_and_sample_every,
-        avg_window=args.avg_window,
-        sched_milestones=sched_milestones,
-        results_folder=results_folder,
-        device=device,
-    )
-
-    if args.load_milestone > 0:
-        ScalerTrainer.load(milestone=args.load_milestone)
+                                                                         )
     if args.mode == "train":
-        ScalerTrainer.train()
-        ScalerTrainer.sample_scales(
-            scale_mul=(1, 1),
-            custom_sample=True,
-            image_name=args.image_name,
-            batch_size=args.sample_batch_size,
-            custom_t_list=sample_t_list,
+        defaults = dict(
+            data_dir="",
+            schedule_sampler="uniform",
+            lr=1e-4,
+            weight_decay=0.0,
+            lr_anneal_steps=args.train_num_steps,
+            num_channels_init=128,
+            num_res_blocks_init=6,
+            scale_factor_init=0.75,
+            min_size=25,
+            max_size=250,
+            nc_im=3,
+            batch_size=1,
+            microbatch=-1,  # -1 disables microbatches
+            ema_rate="0.9999",  # comma-separated list of EMA values
+            log_interval=10,
+            save_interval=10000,
+            resume_checkpoint="",
+            use_fp16=False,
+            fp16_scale_growth=1e-3,
         )
+        defaults.update(model_and_diffusion_defaults())
+        parser = argparse.ArgumentParser()
+        add_dict_to_argparser(parser, defaults)
+        args = parser.parse_args()
+        dist_util.setup_dist()
+        logger.configure()
+
+        real = tv.transforms.ToTensor()(Image.open(args.data_dir))[None]
+        adjust_scales2image(real, args)
+
+        logger.configure()
+
+        logger.log("creating model and diffusion...")
+        model, diffusion = create_model_and_diffusion(
+            **args_to_dict(args, model_and_diffusion_defaults().keys())
+        )
+        model.to(dist_util.dev())
+        schedule_sampler = create_named_schedule_sampler(args.schedule_sampler, diffusion)
+
+        logger.log("creating data loader...")
+        data = load_data(
+            data_dir=args.data_dir,
+            batch_size=args.batch_size,
+            image_size=args.image_size,
+            class_cond=args.class_cond,
+            random_crop=False,
+            random_flip=False,
+            scale_init=args.scale1,
+            scale_factor=args.scale_factor,
+            stop_scale=args.stop_scale,
+            current_scale=args.stop_scale
+        )
+        TrainLoop(
+            model=model,
+            diffusion=diffusion,
+            data=data,
+            batch_size=args.batch_size,
+            microbatch=args.microbatch,
+            lr=args.lr,
+            ema_rate=args.ema_rate,
+            log_interval=args.log_interval,
+            save_interval=args.save_interval,
+            resume_checkpoint=args.resume_checkpoint,
+            use_fp16=args.use_fp16,
+            fp16_scale_growth=args.fp16_scale_growth,
+            schedule_sampler=schedule_sampler,
+            weight_decay=args.weight_decay,
+            lr_anneal_steps=args.lr_anneal_steps,
+        ).run_loop()
     elif args.mode == "sample":
-        ScalerTrainer.sample_scales(scale_mul=scale_mul,
-                                   custom_sample=True,
-                                   image_name=args.image_name,
-                                   batch_size=args.sample_batch_size,
-                                   custom_t_list=sample_t_list,
-                                   save_unbatched=True
-                                   )
+        defaults = dict(
+            data_dir="",
+            clip_denoised=True,
+            num_samples=10000,
+            full_size=(166, 500),
+            num_channels_init=512,
+            num_res_blocks_init=6,
+            scale_factor_init=0.75,
+            min_size=25,
+            max_size=250,
+            nc_im=3,
+            batch_size=8,
+            use_ddim=False,
+            model_path="",
+            model_root="",
+            classifier_scale=10000.0,
+            results_path="",
+        )
+        defaults.update(model_and_diffusion_defaults())
+        defaults.update(classifier_defaults())
+        parser = argparse.ArgumentParser()
+        add_dict_to_argparser(parser, defaults)
+        args = parser.parse_args()
+        args.clip_layers = [2]
+
+        dist_util.setup_dist()
+        logger.configure()
+
+        if not os.path.exists(args.results_path):
+            os.makedirs(args.results_path, exist_ok=True)
+
+        real = tv.transforms.ToTensor()(Image.open(args.data_dir))[None]
+        adjust_scales2image(real, args)
+        models = []
+        diffusions = []
+        for current_scale in range(args.stop_scale + 1)[-1:]:
+            args.class_cond = False  # if current_scale == 0 else True
+            # args.num_channels = min(args.num_channels_init * pow(2, math.floor(current_scale / 2)), 512)
+            # args.num_res_blocks = min(args.num_res_blocks_init + math.floor(current_scale / 4), 6)
+            args.model_path = os.path.join(args.model_root, 'scale_8', 'ema_0.9999_100000.pt')
+            logger.log("creating model and diffusion...")
+            model, diffusion = create_model_and_diffusion(
+                **args_to_dict(args, model_and_diffusion_defaults().keys())
+            )
+            model.load_state_dict(
+                dist_util.load_state_dict(args.model_path, map_location="cpu")
+            )
+            model.to(dist_util.dev())
+
+            if args.use_fp16:
+                model.convert_to_fp16()
+            model.eval()
+
+            models.append(model)
+            diffusions.append(diffusion)
+
+        logger.log("sampling...")
+        for current_scale in range(args.stop_scale + 1)[-1:]:
+            model, diffusion = models[0], diffusions[0]
+            current_factor = math.pow(args.scale_factor, args.stop_scale - current_scale)
+            curr_h, curr_w = round(args.full_size[0] * current_factor), round(args.full_size[1] * current_factor)
+            curr_h_pad, curr_w_pad = math.ceil(curr_h / 8) * 8, math.ceil(curr_w / 8) * 8
+            pad_size = (0, curr_w_pad - curr_w, 0, curr_h_pad - curr_h)
+
+            model_kwargs = {}
+
+            if any(pad_size):
+                model_kwargs["pad_size"] = pad_size
+
+            sample_fn = (
+                diffusion.p_sample_loop if not args.use_ddim else diffusion.ddim_sample_loop
+            )
+            sample = sample_fn(
+                model,
+                (args.batch_size, 3, curr_h, curr_w),
+                clip_denoised=args.clip_denoised,
+                model_kwargs=model_kwargs,
+                device=dist_util.dev(),
+                progress=True
+            )
+            batch_prev = sample.clone()
+            os.makedirs(args.results_path + "scale_" + str(current_scale), exist_ok=True)
+            for i in range(sample.shape[0]):
+                tv.utils.save_image(sample[i] * 0.5 + 0.5,
+                                    args.results_path + "scale_" + str(current_scale) + '/%d.png' % (i + 8))
+        dist.barrier()
+        logger.log("sampling complete")
 
 # # CLIP系列
 #     elif args.mode == 'clip_content':

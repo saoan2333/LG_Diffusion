@@ -1,30 +1,27 @@
+import argparse
 import math
 import torch
 from setuptools.sandbox import save_path
-from skimage import morphology, filters
+import blobfile as bf
+from skimage import morphology, filters, color
 from inspect import isfunction
 import numpy as np
 from PIL import Image
 from pathlib import Path
 from torch import nn
-from abc import abstractmethod
 import torch.nn.functional as F
+from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
+from abc import ABC, abstractmethod
+import torch.distributed as dist
+from . import logger
+from math import pi
+from scipy.ndimage import filters, measurements, interpolation
+from . import gaussian_diffusion as gd
 
-# 混合精度 Mixed Precision,这是旧版apex的amp,待更新!!!!!!!!!!!
-# try:
-#     from torch.cuda import amp
-#     AMP_AVAILABLE = True
-# except:
-#     AMP_AVAILABLE = False
+from .Model import UNet
+from .gaussian_diffusion import GaussianDiffusion
 
-
-# 混合精度下（FP16）的loss反向传播, amp机制待更新！！！！！！！！！！！
-# def loss_backwards(fp16, loss, optimizer, **kwargs):
-#     if fp16:
-#         with amp.scale_loss(loss, optimizer) as scaled_loss:
-#             scaled_loss.backward(**kwargs)
-#     else:
-#         loss.backward(**kwargs)
+INITIAL_LOG_LOSS_SCALE = 20.0
 
 from functools import partial
 from contextlib import contextmanager
@@ -504,7 +501,927 @@ def pad_to_multiple(img: torch.Tensor, mult: int = 8, mode: str = "reflect") -> 
     pad = (0, pad_w, 0, pad_h)
     return F.pad(img, pad, mode=mode)
 
+class ScheduleSampler(ABC):
+
+    @abstractmethod
+    def weights(self):
+        pass
+
+    def sample(self, batch_size, device):
+        w = self.weights()
+        p = w / np.sum(w)
+        indices_np = np.random.choice(len(p), size=(batch_size,), p=p)
+        indices = torch.from_numpy(indices_np).long().to(device)
+        weights_np = 1 / (len(p) * p[indices_np])
+        weights = torch.from_numpy(weights_np).float().to(device)
+        return indices, weights
+
+# 混合精度相关
+
+class UniformSampler(ScheduleSampler):
+    def __init__(self, diffusion):
+        self.diffusion = diffusion
+        self._weights = np.ones([diffusion.num_timesteps])
+
+    def weights(self):
+        return self._weights
+        
+        
+def get_param_groups_and_shapes(named_model_params):
+    named_model_params = list(named_model_params)
+    scalar_vector_named_params = (
+        [(n, p) for (n, p) in named_model_params if p.ndim <= 1],
+        (-1),
+    )
+    matrix_named_params = (
+        [(n, p) for (n, p) in named_model_params if p.ndim > 1],
+        (1, -1),
+    )
+    return [scalar_vector_named_params, matrix_named_params]
+     
+def make_master_params(param_groups_and_shapes):
+
+    master_params = []
+    for param_group, shape in param_groups_and_shapes:
+        master_param = nn.Parameter(
+            _flatten_dense_tensors(
+                [param.detach().float() for (_, param) in param_group]
+            ).view(shape)
+        )
+        master_param.requires_grad = True
+        master_params.append(master_param)
+    return master_params
+
+def zero_grad(model_params):
+    for param in model_params:
+        if param.grad is not None:
+            param.grad.detach_()
+            param.grad.zero_()
+
+
+def zero_master_grads(master_params):
+    for param in master_params:
+        param.grad = None
+
+def param_grad_or_zeros(param):
+    if param.grad is not None:
+        return param.grad.data.detach()
+    else:
+        return torch.zeros_like(param)
+
+def model_grads_to_master_grads(param_groups_and_shapes, master_params):
+    for master_param, (param_group, shape) in zip(
+        master_params, param_groups_and_shapes
+    ):
+        master_param.grad = _flatten_dense_tensors(
+            [param_grad_or_zeros(param) for (_, param) in param_group]
+        ).view(shape)
+
+def check_overflow(value):
+    return (value == float("inf")) or (value == -float("inf")) or (value != value)
+
+def unflatten_master_params(param_group, master_param):
+    return _unflatten_dense_tensors(master_param, [param for (_, param) in param_group])
+
+def master_params_to_state_dict(
+    model, param_groups_and_shapes, master_params, use_fp16
+):
+    if use_fp16:
+        state_dict = model.state_dict()
+        for master_param, (param_group, _) in zip(
+            master_params, param_groups_and_shapes
+        ):
+            for (name, _), unflat_master_param in zip(
+                param_group, unflatten_master_params(param_group, master_param.view(-1))
+            ):
+                assert name in state_dict
+                state_dict[name] = unflat_master_param
+    else:
+        state_dict = model.state_dict()
+        for i, (name, _value) in enumerate(model.named_parameters()):
+            assert name in state_dict
+            state_dict[name] = master_params[i]
+    return state_dict
+
+
+def state_dict_to_master_params(model, state_dict, use_fp16):
+    if use_fp16:
+        named_model_params = [
+            (name, state_dict[name]) for name, _ in model.named_parameters()
+        ]
+        param_groups_and_shapes = get_param_groups_and_shapes(named_model_params)
+        master_params = make_master_params(param_groups_and_shapes)
+    else:
+        master_params = [state_dict[name] for name, _ in model.named_parameters()]
+    return master_params
+
+def master_params_to_model_params(param_groups_and_shapes, master_params):
+    for master_param, (param_group, _) in zip(master_params, param_groups_and_shapes):
+        for (_, param), unflat_master_param in zip(
+            param_group, unflatten_master_params(param_group, master_param.view(-1))
+        ):
+            param.detach().copy_(unflat_master_param)
+
+class MixedPrecisionTrainer:
+    def __init__(
+        self,
+        *,
+        model,
+        use_fp16=False,
+        fp16_scale_growth=1e-3,
+        initial_lg_loss_scale=INITIAL_LOG_LOSS_SCALE,
+    ):
+        self.model = model
+        self.use_fp16 = use_fp16
+        self.fp16_scale_growth = fp16_scale_growth
+
+        self.model_params = list(self.model.parameters())
+        self.master_params = self.model_params
+        self.param_groups_and_shapes = None
+        self.lg_loss_scale = initial_lg_loss_scale
+
+        if self.use_fp16:
+            self.param_groups_and_shapes = get_param_groups_and_shapes(
+                self.model.named_parameters()
+            )
+            self.master_params = make_master_params(self.param_groups_and_shapes)
+            self.model.convert_to_fp16()
+
+    def zero_grad(self):
+        zero_grad(self.model_params)
+
+    def backward(self, loss: torch.Tensor):
+        if self.use_fp16:
+            loss_scale = 2 ** self.lg_loss_scale
+            (loss * loss_scale).backward()
+        else:
+            loss.backward()
+
+    def optimize(self, opt: torch.optim.Optimizer):
+        if self.use_fp16:
+            return self._optimize_fp16(opt)
+        else:
+            return self._optimize_normal(opt)
+
+    def _optimize_fp16(self, opt: torch.optim.Optimizer):
+        logger.logkv_mean("lg_loss_scale", self.lg_loss_scale)
+        model_grads_to_master_grads(self.param_groups_and_shapes, self.master_params)
+        grad_norm, param_norm = self._compute_norms(grad_scale=2 ** self.lg_loss_scale)
+        if check_overflow(grad_norm):
+            self.lg_loss_scale -= 1
+            logger.log(f"Found NaN, decreased lg_loss_scale to {self.lg_loss_scale}")
+            zero_master_grads(self.master_params)
+            return False
+
+        logger.logkv_mean("grad_norm", grad_norm)
+        logger.logkv_mean("param_norm", param_norm)
+
+        self.master_params[0].grad.mul_(1.0 / (2 ** self.lg_loss_scale))
+        opt.step()
+        zero_master_grads(self.master_params)
+        master_params_to_model_params(self.param_groups_and_shapes, self.master_params)
+        self.lg_loss_scale += self.fp16_scale_growth
+        return True
+
+    def _optimize_normal(self, opt: torch.optim.Optimizer):
+        grad_norm, param_norm = self._compute_norms()
+        logger.logkv_mean("grad_norm", grad_norm)
+        logger.logkv_mean("param_norm", param_norm)
+        opt.step()
+        return True
+
+    def _compute_norms(self, grad_scale=1.0):
+        grad_norm = 0.0
+        param_norm = 0.0
+        for p in self.master_params:
+            with torch.no_grad():
+                param_norm += torch.norm(p, p=2, dtype=torch.float32).item() ** 2
+                if p.grad is not None:
+                    grad_norm += torch.norm(p.grad, p=2, dtype=torch.float32).item() ** 2
+        return np.sqrt(grad_norm) / grad_scale, np.sqrt(param_norm)
+
+    def master_params_to_state_dict(self, master_params):
+        return master_params_to_state_dict(
+            self.model, self.param_groups_and_shapes, master_params, self.use_fp16
+        )
+
+    def state_dict_to_master_params(self, state_dict):
+        return state_dict_to_master_params(self.model, state_dict, self.use_fp16)
+
+
+# UNetModel相关
+def find_resume_checkpoint():
+    # On your infrastructure, you may want to override this to automatically
+    # discover the latest checkpoint on your blob storage, etc.
+    return None
+
+def parse_resume_step_from_filename(filename):
+    """
+    Parse filenames of the form path/to/modelNNNNNN.pt, where NNNNNN is the
+    checkpoint's number of steps.
+    """
+    split = filename.split("model")
+    if len(split) < 2:
+        return 0
+    split1 = split[-1].split(".")[0]
+    try:
+        return int(split1)
+    except ValueError:
+        return 0
+
+def find_ema_checkpoint(main_checkpoint, step, rate):
+    if main_checkpoint is None:
+        return None
+    filename = f"ema_{rate}_{(step):06d}.pt"
+    path = bf.join(bf.dirname(main_checkpoint), filename)
+    if bf.exists(path):
+        return path
+    return None
+
+def get_blob_logdir():
+    # You can change this to be a separate path to save checkpoints to
+    # a blobstore or some external drive.
+    return logger.get_dir()
 
 
 
+def log_loss_dict(diffusion, ts, losses):
+    for key, values in losses.items():
+        logger.logkv_mean(key, values.mean().item())
+        # Log the quantiles (four quartiles, in particular).
+        for sub_t, sub_loss in zip(ts.cpu().numpy(), values.detach().cpu().numpy()):
+            quartile = int(4 * sub_t / diffusion.num_timesteps)
+            logger.logkv_mean(f"{key}_q{quartile}", sub_loss)
 
+#  LossAwareSampler
+class LossAwareSampler(ScheduleSampler):
+    def update_with_local_losses(self, local_ts, local_losses):
+
+        batch_sizes = [
+            torch.tensor([0], dtype=torch.int32, device=local_ts.device)
+            for _ in range(dist.get_world_size())
+        ]
+        dist.all_gather(
+            batch_sizes,
+            torch.tensor([len(local_ts)], dtype=torch.int32, device=local_ts.device),
+        )
+
+        # Pad all_gather batches to be the maximum batch size.
+        batch_sizes = [x.item() for x in batch_sizes]
+        max_bs = max(batch_sizes)
+
+        timestep_batches = [torch.zeros(max_bs).to(local_ts) for bs in batch_sizes]
+        loss_batches = [torch.zeros(max_bs).to(local_losses) for bs in batch_sizes]
+        dist.all_gather(timestep_batches, local_ts)
+        dist.all_gather(loss_batches, local_losses)
+        timesteps = [
+            x.item() for y, bs in zip(timestep_batches, batch_sizes) for x in y[:bs]
+        ]
+        losses = [x.item() for y, bs in zip(loss_batches, batch_sizes) for x in y[:bs]]
+        self.update_with_all_losses(timesteps, losses)
+
+    @abstractmethod
+    def update_with_all_losses(self, ts, losses):
+        pass
+    
+# EMA
+def update_ema(target_params, source_params, rate=0.99):
+
+    for targ, src in zip(target_params, source_params):
+        targ.detach().mul_(rate).add_(src, alpha=1 - rate)
+
+def denorm(x):
+    out = (x + 1) / 2
+    return out.clamp(0, 1)
+
+def torch2uint8(x):
+    x = x[0,:,:,:]
+    x = x.permute((1,2,0))
+    x = 255*denorm(x)
+    x = x.cpu().numpy()
+    x = x.astype(np.uint8)
+    return x
+
+def fix_scale_and_size(input_shape, output_shape, scale_factor):
+    # First fixing the scale-factor (if given) to be standardized the function expects (a list of scale factors in the
+    # same size as the number of input dimensions)
+    if scale_factor is not None:
+        # By default, if scale-factor is a scalar we assume 2d resizing and duplicate it.
+        if np.isscalar(scale_factor):
+            scale_factor = [scale_factor, scale_factor]
+
+        # We extend the size of scale-factor list to the size of the input by assigning 1 to all the unspecified scales
+        scale_factor = list(scale_factor)
+        scale_factor.extend([1] * (len(input_shape) - len(scale_factor)))
+
+    # Fixing output-shape (if given): extending it to the size of the input-shape, by assigning the original input-size
+    # to all the unspecified dimensions
+    if output_shape is not None:
+        output_shape = list(np.uint(np.array(output_shape))) + list(input_shape[len(output_shape):])
+
+    # Dealing with the case of non-give scale-factor, calculating according to output-shape. note that this is
+    # sub-optimal, because there can be different scales to the same output-shape.
+    if scale_factor is None:
+        scale_factor = 1.0 * np.array(output_shape) / np.array(input_shape)
+
+    # Dealing with missing output-shape. calculating according to scale-factor
+    if output_shape is None:
+        output_shape = np.uint(np.ceil(np.array(input_shape) * np.array(scale_factor)))
+
+    return scale_factor, output_shape
+
+def kernel_shift(kernel, sf):
+    # There are two reasons for shifting the kernel:
+    # 1. Center of mass is not in the center of the kernel which creates ambiguity. There is no possible way to know
+    #    the degradation process included shifting so we always assume center of mass is center of the kernel.
+    # 2. We further shift kernel center so that top left result pixel corresponds to the middle of the sfXsf first
+    #    pixels. Default is for odd size to be in the middle of the first pixel and for even sized kernel to be at the
+    #    top left corner of the first pixel. that is why different shift size needed between od and even size.
+    # Given that these two conditions are fulfilled, we are happy and aligned, the way to test it is as follows:
+    # The input image, when interpolated (regular bicubic) is exactly aligned with ground truth.
+
+    # First calculate the current center of mass for the kernel
+    current_center_of_mass = measurements.center_of_mass(kernel)
+
+    # The second ("+ 0.5 * ....") is for applying condition 2 from the comments above
+    wanted_center_of_mass = np.array(kernel.shape) / 2 + 0.5 * (sf - (kernel.shape[0] % 2))
+
+    # Define the shift vector for the kernel shifting (x,y)
+    shift_vec = wanted_center_of_mass - current_center_of_mass
+
+    # Before applying the shift, we first pad the kernel so that nothing is lost due to the shift
+    # (biggest shift among dims + 1 for safety)
+    kernel = np.pad(kernel, np.int(np.ceil(np.max(shift_vec))) + 1, 'constant')
+
+    # Finally shift the kernel and return
+    return interpolation.shift(kernel, shift_vec)
+
+
+def numeric_kernel(im, kernel, scale_factor, output_shape, kernel_shift_flag):
+    # See kernel_shift function to understand what this is
+    if kernel_shift_flag:
+        kernel = kernel_shift(kernel, scale_factor)
+
+    # First run a correlation (convolution with flipped kernel)
+    out_im = np.zeros_like(im)
+    for channel in range(np.ndim(im)):
+        out_im[:, :, channel] = filters.correlate(im[:, :, channel], kernel)
+
+    # Then subsample and return
+    return out_im[np.round(np.linspace(0, im.shape[0] - 1 / scale_factor[0], output_shape[0])).astype(int)[:, None],
+                  np.round(np.linspace(0, im.shape[1] - 1 / scale_factor[1], output_shape[1])).astype(int), :]
+
+def cubic(x):
+    absx = np.abs(x)
+    absx2 = absx ** 2
+    absx3 = absx ** 3
+    return ((1.5*absx3 - 2.5*absx2 + 1) * (absx <= 1) +
+            (-0.5*absx3 + 2.5*absx2 - 4*absx + 2) * ((1 < absx) & (absx <= 2)))
+
+
+def lanczos2(x):
+    return (((np.sin(pi*x) * np.sin(pi*x/2) + np.finfo(np.float32).eps) /
+             ((pi**2 * x**2 / 2) + np.finfo(np.float32).eps))
+            * (abs(x) < 2))
+
+
+def box(x):
+    return ((-0.5 <= x) & (x < 0.5)) * 1.0
+
+
+def lanczos3(x):
+    return (((np.sin(pi*x) * np.sin(pi*x/3) + np.finfo(np.float32).eps) /
+             ((math.pi ** 2 * x ** 2 / 3) + np.finfo(np.float32).eps))
+            * (abs(x) < 3))
+
+
+def linear(x):
+    return (x + 1) * ((-1 <= x) & (x < 0)) + (1 - x) * ((0 <= x) & (x <= 1))
+
+def contributions(in_length, out_length, scale, kernel, kernel_width, antialiasing):
+    # This function calculates a set of 'filters' and a set of field_of_view that will later on be applied
+    # such that each position from the field_of_view will be multiplied with a matching filter from the
+    # 'weights' based on the interpolation method and the distance of the sub-pixel location from the pixel centers
+    # around it. This is only done for one dimension of the image.
+
+    # When anti-aliasing is activated (default and only for downscaling) the receptive field is stretched to size of
+    # 1/sf. this means filtering is more 'low-pass filter'.
+    fixed_kernel = (lambda arg: scale * kernel(scale * arg)) if antialiasing else kernel
+    kernel_width *= 1.0 / scale if antialiasing else 1.0
+
+    # These are the coordinates of the output image
+    out_coordinates = np.arange(1, out_length+1)
+
+    # These are the matching positions of the output-coordinates on the input image coordinates.
+    # Best explained by example: say we have 4 horizontal pixels for HR and we downscale by SF=2 and get 2 pixels:
+    # [1,2,3,4] -> [1,2]. Remember each pixel number is the middle of the pixel.
+    # The scaling is done between the distances and not pixel numbers (the right boundary of pixel 4 is transformed to
+    # the right boundary of pixel 2. pixel 1 in the small image matches the boundary between pixels 1 and 2 in the big
+    # one and not to pixel 2. This means the position is not just multiplication of the old pos by scale-factor).
+    # So if we measure distance from the left border, middle of pixel 1 is at distance d=0.5, border between 1 and 2 is
+    # at d=1, and so on (d = p - 0.5).  we calculate (d_new = d_old / sf) which means:
+    # (p_new-0.5 = (p_old-0.5) / sf)     ->          p_new = p_old/sf + 0.5 * (1-1/sf)
+    match_coordinates = 1.0 * out_coordinates / scale + 0.5 * (1 - 1.0 / scale)
+
+    # This is the left boundary to start multiplying the filter from, it depends on the size of the filter
+    left_boundary = np.floor(match_coordinates - kernel_width / 2)
+
+    # Kernel width needs to be enlarged because when covering has sub-pixel borders, it must 'see' the pixel centers
+    # of the pixels it only covered a part from. So we add one pixel at each side to consider (weights can zeroize them)
+    expanded_kernel_width = np.ceil(kernel_width) + 2
+
+    # Determine a set of field_of_view for each each output position, these are the pixels in the input image
+    # that the pixel in the output image 'sees'. We get a matrix whos horizontal dim is the output pixels (big) and the
+    # vertical dim is the pixels it 'sees' (kernel_size + 2)
+    field_of_view = np.squeeze(np.uint(np.expand_dims(left_boundary, axis=1) + np.arange(expanded_kernel_width) - 1))
+
+    # Assign weight to each pixel in the field of view. A matrix whos horizontal dim is the output pixels and the
+    # vertical dim is a list of weights matching to the pixel in the field of view (that are specified in
+    # 'field_of_view')
+    weights = fixed_kernel(1.0 * np.expand_dims(match_coordinates, axis=1) - field_of_view - 1)
+
+    # Normalize weights to sum up to 1. be careful from dividing by 0
+    sum_weights = np.sum(weights, axis=1)
+    sum_weights[sum_weights == 0] = 1.0
+    weights = 1.0 * weights / np.expand_dims(sum_weights, axis=1)
+
+    # We use this mirror structure as a trick for reflection padding at the boundaries
+    mirror = np.uint(np.concatenate((np.arange(in_length), np.arange(in_length - 1, -1, step=-1))))
+    field_of_view = mirror[np.mod(field_of_view, mirror.shape[0])]
+
+    # Get rid of  weights and pixel positions that are of zero weight
+    non_zero_out_pixels = np.nonzero(np.any(weights, axis=0))
+    weights = np.squeeze(weights[:, non_zero_out_pixels])
+    field_of_view = np.squeeze(field_of_view[:, non_zero_out_pixels])
+
+    # Final products are the relative positions and the matching weights, both are output_size X fixed_kernel_size
+    return weights, field_of_view
+
+
+def resize_along_dim(im, dim, weights, field_of_view):
+    # To be able to act on each dim, we swap so that dim 0 is the wanted dim to resize
+    tmp_im = np.swapaxes(im, dim, 0)
+
+    # We add singleton dimensions to the weight matrix so we can multiply it with the big tensor we get for
+    # tmp_im[field_of_view.T], (bsxfun style)
+    weights = np.reshape(weights.T, list(weights.T.shape) + (np.ndim(im) - 1) * [1])
+
+    # This is a bit of a complicated multiplication: tmp_im[field_of_view.T] is a tensor of order image_dims+1.
+    # for each pixel in the output-image it matches the positions the influence it from the input image (along 1 dim
+    # only, this is why it only adds 1 dim to the shape). We then multiply, for each pixel, its set of positions with
+    # the matching set of weights. we do this by this big tensor element-wise multiplication (MATLAB bsxfun style:
+    # matching dims are multiplied element-wise while singletons mean that the matching dim is all multiplied by the
+    # same number
+    tmp_out_im = np.sum(tmp_im[field_of_view.T] * weights, axis=0)
+
+    # Finally we swap back the axes to the original order
+    return np.swapaxes(tmp_out_im, dim, 0)
+
+
+def imresize_in(im, scale_factor=None, output_shape=None, kernel=None, antialiasing=True, kernel_shift_flag=False):
+    # First standardize values and fill missing arguments (if needed) by deriving scale from output shape or vice versa
+    scale_factor, output_shape = fix_scale_and_size(im.shape, output_shape, scale_factor)
+
+    # For a given numeric kernel case, just do convolution and sub-sampling (downscaling only)
+    if type(kernel) == np.ndarray and scale_factor[0] <= 1:
+        return numeric_kernel(im, kernel, scale_factor, output_shape, kernel_shift_flag)
+
+    # Choose interpolation method, each method has the matching kernel size
+    method, kernel_width = {
+        "cubic": (cubic, 4.0),
+        "lanczos2": (lanczos2, 4.0),
+        "lanczos3": (lanczos3, 6.0),
+        "box": (box, 1.0),
+        "linear": (linear, 2.0),
+        None: (cubic, 4.0)  # set default interpolation method as cubic
+    }.get(kernel)
+
+    # Antialiasing is only used when downscaling
+    antialiasing *= (scale_factor[0] < 1)
+
+    # Sort indices of dimensions according to scale of each dimension. since we are going dim by dim this is efficient
+    sorted_dims = np.argsort(np.array(scale_factor)).tolist()
+
+    # Iterate over dimensions to calculate local weights for resizing and resize each time in one direction
+    out_im = np.copy(im)
+    for dim in sorted_dims:
+        # No point doing calculations for scale-factor 1. nothing will happen anyway
+        if scale_factor[dim] == 1.0:
+            continue
+
+        # for each coordinate (along 1 dim), calculate which coordinates in the input image affect its result and the
+        # weights that multiply the values there to get its result.
+        weights, field_of_view = contributions(im.shape[dim], output_shape[dim], scale_factor[dim],
+                                               method, kernel_width, antialiasing)
+
+        # Use the affecting position values and the set of weights to calculate the result of resizing along this 1 dim
+        out_im = resize_along_dim(out_im, dim, weights, field_of_view)
+
+    return out_im
+
+def move_to_gpu(t):
+    if (torch.cuda.is_available()):
+        t = t.to(torch.device('cuda'))
+    return t
+
+def norm(x):
+    out = (x - 0.5) * 2
+    return out.clamp(-1, 1)
+
+def np2torch(x,opt):
+    if opt.nc_im == 3:
+        x = x[:,:,:,None]
+        x = x.transpose((3, 2, 0, 1))/255
+    else:
+        x = color.rgb2gray(x)
+        x = x[:,:,None,None]
+        x = x.transpose(3, 2, 0, 1)
+    x = torch.from_numpy(x)
+    x = move_to_gpu(x)
+    x = x.type(torch.cuda.FloatTensor)
+    x = norm(x)
+    return x
+
+def imresize(im,scale,opt):
+    #s = im.shape
+    im = torch2uint8(im)
+    im = imresize_in(im, scale_factor=scale)
+    im = np2torch(im,opt)
+    #im = im[:, :, 0:int(scale * s[2]), 0:int(scale * s[3])]
+    return im
+
+def adjust_scales2image(real_,opt):
+    opt.num_scales = math.ceil((math.log(math.pow(opt.min_size / (min(real_.shape[2], real_.shape[3])), 1), opt.scale_factor_init))) + 1
+    scale2stop = math.ceil(math.log(min([opt.max_size, max([real_.shape[2], real_.shape[3]])]) / max([real_.shape[2], real_.shape[3]]),opt.scale_factor_init))
+    opt.stop_scale = opt.num_scales - scale2stop
+    opt.scale1 = min(opt.max_size / max([real_.shape[2], real_.shape[3]]),1)
+    real = imresize(real_, opt.scale1, opt)
+    opt.scale_factor = math.pow(opt.min_size/(min(real.shape[2],real.shape[3])),1/(opt.stop_scale))
+    scale2stop = math.ceil(math.log(min([opt.max_size, max([real_.shape[2], real_.shape[3]])]) / max([real_.shape[2], real_.shape[3]]),opt.scale_factor_init))
+    opt.stop_scale = opt.num_scales - scale2stop
+    return real
+
+# 模型初始化函数
+def create_model(
+    image_size,
+    num_channels,
+    num_res_blocks,
+    channel_mult="",
+    learn_sigma=False,
+    class_cond=False,
+    use_checkpoint=False,
+    attention_resolutions="16",
+    num_heads=1,
+    num_head_channels=-1,
+    num_heads_upsample=-1,
+    use_scale_shift_norm=False,
+    dropout=0,
+    resblock_updown=False,
+    use_fp16=False,
+    use_new_attention_order=False,
+):
+    if channel_mult == "":
+        if image_size == 512:
+            channel_mult = (0.5, 1, 1, 2, 2, 4, 4)
+        elif image_size == 256:
+            channel_mult = (1, 1, 2, 2, 4, 4)
+        elif image_size == 128:
+            channel_mult = (1, 1, 2, 3, 4)
+        elif image_size == 64:
+            channel_mult = (1, 2, 3, 4)
+        elif image_size == 32:
+            channel_mult = (1, 2, 4)
+        else:
+            raise ValueError(f"unsupported image size: {image_size}")
+    else:
+        channel_mult = tuple(int(ch_mult) for ch_mult in channel_mult.split(","))
+
+    attention_ds = []
+    for res in attention_resolutions.split(","):
+        attention_ds.append(image_size // int(res))
+
+    return UNet(
+        in_channels=(3 if not class_cond else 6),
+        model_channels=num_channels,
+        out_channels=(3 if not learn_sigma else 6),
+        num_res_blocks=num_res_blocks,
+        attention_resolutions=tuple(attention_ds),
+        dropout=dropout,
+        channel_mult=channel_mult,
+        num_classes=None,
+        use_checkpoint=use_checkpoint,
+        use_fp16=use_fp16,
+        num_heads=num_heads,
+        num_head_channels=num_head_channels,
+        num_heads_upsample=num_heads_upsample,
+        use_scale_shift_norm=use_scale_shift_norm,
+        resblock_updown=resblock_updown,
+        use_new_attention_order=use_new_attention_order,
+    )
+
+def create_model_and_diffusion(
+    image_size,
+    class_cond,
+    learn_sigma,
+    num_channels,
+    num_res_blocks,
+    channel_mult,
+    num_heads,
+    num_head_channels,
+    num_heads_upsample,
+    attention_resolutions,
+    dropout,
+    diffusion_steps,
+    noise_schedule,
+    timestep_respacing,
+    use_kl,
+    predict_xstart,
+    rescale_timesteps,
+    rescale_learned_sigmas,
+    use_checkpoint,
+    use_scale_shift_norm,
+    resblock_updown,
+    use_fp16,
+    use_new_attention_order,
+):
+    model = create_model(
+        image_size,
+        num_channels,
+        num_res_blocks,
+        channel_mult=channel_mult,
+        learn_sigma=learn_sigma,
+        class_cond=class_cond,
+        use_checkpoint=use_checkpoint,
+        attention_resolutions=attention_resolutions,
+        num_heads=num_heads,
+        num_head_channels=num_head_channels,
+        num_heads_upsample=num_heads_upsample,
+        use_scale_shift_norm=use_scale_shift_norm,
+        dropout=dropout,
+        resblock_updown=resblock_updown,
+        use_fp16=use_fp16,
+        use_new_attention_order=use_new_attention_order,
+    )
+    diffusion = create_gaussian_diffusion(
+        steps=diffusion_steps,
+        learn_sigma=learn_sigma,
+        noise_schedule=noise_schedule,
+        use_kl=use_kl,
+        predict_xstart=predict_xstart,
+        rescale_timesteps=rescale_timesteps,
+        rescale_learned_sigmas=rescale_learned_sigmas,
+        timestep_respacing=timestep_respacing,
+    )
+    return model, diffusion
+
+class _WrappedModel:
+    def __init__(self, model, timestep_map, rescale_timesteps, original_num_steps):
+        self.model = model
+        self.timestep_map = timestep_map
+        self.rescale_timesteps = rescale_timesteps
+        self.original_num_steps = original_num_steps
+
+    def __call__(self, x, ts, **kwargs):
+        map_tensor = torch.tensor(self.timestep_map, device=ts.device, dtype=ts.dtype)
+        new_ts = map_tensor[ts]
+        if self.rescale_timesteps:
+            new_ts = new_ts.float() * (1000.0 / self.original_num_steps)
+        return self.model(x, new_ts, **kwargs)
+
+
+class SpacedDiffusion(GaussianDiffusion):
+
+    def __init__(self, use_timesteps, **kwargs):
+        self.use_timesteps = set(use_timesteps)
+        self.timestep_map = []
+        self.original_num_steps = len(kwargs["betas"])
+
+        base_diffusion = GaussianDiffusion(**kwargs)  # pylint: disable=missing-kwoa
+        last_alpha_cumprod = 1.0
+        new_betas = []
+        for i, alpha_cumprod in enumerate(base_diffusion.alphas_cumprod):
+            if i in self.use_timesteps:
+                new_betas.append(1 - alpha_cumprod / last_alpha_cumprod)
+                last_alpha_cumprod = alpha_cumprod
+                self.timestep_map.append(i)
+        kwargs["betas"] = np.array(new_betas)
+        super().__init__(**kwargs)
+
+    def p_mean_variance(
+        self, model, *args, **kwargs
+    ):  # pylint: disable=signature-differs
+        return super().p_mean_variance(self._wrap_model(model), *args, **kwargs)
+
+    def training_losses(
+        self, model, *args, **kwargs
+    ):  # pylint: disable=signature-differs
+        return super().training_losses(self._wrap_model(model), *args, **kwargs)
+
+    def condition_mean(self, cond_fn, *args, **kwargs):
+        return super().condition_mean(self._wrap_model(cond_fn), *args, **kwargs)
+
+    def condition_score(self, cond_fn, *args, **kwargs):
+        return super().condition_score(self._wrap_model(cond_fn), *args, **kwargs)
+
+    def _wrap_model(self, model):
+        if isinstance(model, _WrappedModel):
+            return model
+        return _WrappedModel(
+            model, self.timestep_map, self.rescale_timesteps, self.original_num_steps
+        )
+
+    def _scale_timesteps(self, t):
+        # Scaling is done by the wrapped model.
+        return t
+
+def space_timesteps(num_timesteps, section_counts):
+    if isinstance(section_counts, str):
+        if section_counts.startswith("ddim"):
+            desired_count = int(section_counts[len("ddim") :])
+            for i in range(1, num_timesteps):
+                if len(range(0, num_timesteps, i)) == desired_count:
+                    return set(range(0, num_timesteps, i))
+            raise ValueError(
+                f"cannot create exactly {num_timesteps} steps with an integer stride"
+            )
+        section_counts = [int(x) for x in section_counts.split(",")]
+    size_per = num_timesteps // len(section_counts)
+    extra = num_timesteps % len(section_counts)
+    start_idx = 0
+    all_steps = []
+    for i, section_count in enumerate(section_counts):
+        size = size_per + (1 if i < extra else 0)
+        if size < section_count:
+            raise ValueError(
+                f"cannot divide section of {size} steps into {section_count}"
+            )
+        if section_count <= 1:
+            frac_stride = 1
+        else:
+            frac_stride = (size - 1) / (section_count - 1)
+        cur_idx = 0.0
+        taken_steps = []
+        for _ in range(section_count):
+            taken_steps.append(start_idx + round(cur_idx))
+            cur_idx += frac_stride
+        all_steps += taken_steps
+        start_idx += size
+    return set(all_steps)
+
+
+
+def create_gaussian_diffusion(
+    *,
+    steps=1000,
+    learn_sigma=False,
+    sigma_small=False,
+    noise_schedule="linear",
+    use_kl=False,
+    predict_xstart=False,
+    rescale_timesteps=False,
+    rescale_learned_sigmas=False,
+    timestep_respacing="",
+):
+    betas = gd.get_named_beta_schedule(noise_schedule, steps)
+    if use_kl:
+        loss_type = gd.LossType.RESCALED_KL
+    elif rescale_learned_sigmas:
+        loss_type = gd.LossType.RESCALED_MSE
+    else:
+        loss_type = gd.LossType.MSE
+    if not timestep_respacing:
+        timestep_respacing = [steps]
+    return SpacedDiffusion(
+        use_timesteps=space_timesteps(steps, timestep_respacing),
+        betas=betas,
+        model_mean_type=(
+            gd.ModelMeanType.EPSILON if not predict_xstart else gd.ModelMeanType.START_X
+        ),
+        model_var_type=(
+            (
+                gd.ModelVarType.FIXED_LARGE
+                if not sigma_small
+                else gd.ModelVarType.FIXED_SMALL
+            )
+            if not learn_sigma
+            else gd.ModelVarType.LEARNED_RANGE
+        ),
+        loss_type=loss_type,
+        rescale_timesteps=rescale_timesteps,
+    )
+
+def args_to_dict(args, keys):
+    return {k: getattr(args, k) for k in keys}
+
+def diffusion_defaults():
+    return dict(
+        learn_sigma=False,
+        diffusion_steps=1000,
+        noise_schedule="linear",
+        timestep_respacing="",
+        use_kl=False,
+        predict_xstart=False,
+        rescale_timesteps=False,
+        rescale_learned_sigmas=False,
+    )
+
+
+def model_and_diffusion_defaults():
+
+    res = dict(
+        image_size=64,
+        num_channels=128,
+        num_res_blocks=2,
+        num_heads=4,
+        num_heads_upsample=-1,
+        num_head_channels=-1,
+        attention_resolutions="16,8",
+        channel_mult="",
+        dropout=0.0,
+        class_cond=False,
+        use_checkpoint=False,
+        use_scale_shift_norm=True,
+        resblock_updown=False,
+        use_fp16=False,
+        use_new_attention_order=False,
+    )
+    res.update(diffusion_defaults())
+    return res
+
+class LossSecondMomentResampler(LossAwareSampler):
+    def __init__(self, diffusion, history_per_term=10, uniform_prob=0.001):
+        self.diffusion = diffusion
+        self.history_per_term = history_per_term
+        self.uniform_prob = uniform_prob
+        self._loss_history = np.zeros(
+            [diffusion.num_timesteps, history_per_term], dtype=np.float64
+        )
+        self._loss_counts = np.zeros([diffusion.num_timesteps], dtype=np.int)
+
+    def weights(self):
+        if not self._warmed_up():
+            return np.ones([self.diffusion.num_timesteps], dtype=np.float64)
+        weights = np.sqrt(np.mean(self._loss_history ** 2, axis=-1))
+        weights /= np.sum(weights)
+        weights *= 1 - self.uniform_prob
+        weights += self.uniform_prob / len(weights)
+        return weights
+
+    def update_with_all_losses(self, ts, losses):
+        for t, loss in zip(ts, losses):
+            if self._loss_counts[t] == self.history_per_term:
+                # Shift out the oldest loss term.
+                self._loss_history[t, :-1] = self._loss_history[t, 1:]
+                self._loss_history[t, -1] = loss
+            else:
+                self._loss_history[t, self._loss_counts[t]] = loss
+                self._loss_counts[t] += 1
+
+    def _warmed_up(self):
+        return (self._loss_counts == self.history_per_term).all()
+
+
+def create_named_schedule_sampler(name, diffusion):
+    if name == "uniform":
+        return UniformSampler(diffusion)
+    elif name == "loss-second-moment":
+        return LossSecondMomentResampler(diffusion)
+    else:
+        raise NotImplementedError(f"unknown schedule sampler: {name}")
+
+def add_dict_to_argparser(parser, default_dict):
+    for k, v in default_dict.items():
+        v_type = type(v)
+        if v is None:
+            v_type = str
+        elif isinstance(v, bool):
+            v_type = str2bool
+        parser.add_argument(f"--{k}", default=v, type=v_type)
+
+def str2bool(v):
+    """
+    https://stackoverflow.com/questions/15008758/parsing-boolean-values-with-argparse
+    """
+    if isinstance(v, bool):
+        return v
+    if v.lower() in ("yes", "true", "t", "y", "1"):
+        return True
+    elif v.lower() in ("no", "false", "f", "n", "0"):
+        return False
+    else:
+        raise argparse.ArgumentTypeError("boolean value expected")
+
+def classifier_defaults():
+    """
+    Defaults for classifier models.
+    """
+    return dict(
+        image_size=64,
+        classifier_use_fp16=False,
+        classifier_width=128,
+        classifier_depth=2,
+        classifier_attention_resolutions="32,16,8",  # 16
+        classifier_use_scale_shift_norm=True,  # False
+        classifier_resblock_updown=True,  # False
+        classifier_pool="attention",
+    )

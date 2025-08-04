@@ -97,7 +97,7 @@ class MutiScaleTrainer(object):
             self.sched_milestones = sched_milestones
         if image_sizes is None:
             image_sizes = []
-        self.model = ms_diffusion_model.to(device)
+        self.model = ms_diffusion_model.half().to(device)
         self.ema = EMA(ema_decay)
         self.ema_model = copy.deepcopy(self.model)
         self.update_ema_every = update_ema_every

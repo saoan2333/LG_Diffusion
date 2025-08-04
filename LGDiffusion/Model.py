@@ -161,7 +161,7 @@ class UNet(nn.Module):
         conv_resample=True,
         dims=2,
         num_classes=None,
-        use_checkpoint=False,
+        use_checkpoint=True,
         use_fp16=False,
         num_heads=1,
         num_head_channels=-1,
@@ -331,7 +331,6 @@ class UNet(nn.Module):
         return self.out(h)
 
 # 模型结构定义
-
 class Diffusion(nn.Module):
     def __init__(
             self,
