@@ -102,10 +102,10 @@ def create_argparser():
     defaults = dict(
         data_dir="",
         clip_denoised=True,
-        num_samples=10000,
+        num_samples=100,
         full_size=(166, 500),
-        num_channels_init=512,
-        num_res_blocks_init=6,
+        num_channels_init=128,
+        num_res_blocks_init=2,
         scale_factor_init=0.75,
         min_size=25,
         max_size=250,
