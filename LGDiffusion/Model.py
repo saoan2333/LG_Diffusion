@@ -2,9 +2,11 @@
 #updata
 from sympy.strategies.branch import condition
 
-from LGDiffusion.Functions import *
-from LGDiffusion.Functions import SiLU
+# from LGDiffusion.Functions import *
+# from LGDiffusion.Functions import SiLU
 import math
+import numpy as np
+import torch
 from torch import nn
 from einops import rearrange
 from functools import partial
@@ -12,6 +14,12 @@ import torch.nn.functional as F
 from torchvision import utils
 from matplotlib import pyplot as plt
 from tqdm import tqdm
+from pathlib import Path
+
+from LGDiffusion.Functions import exists, default, SiLU, TimestepEmbedSequential, conv_nd, ResBlock, Downsample, \
+    Upsample, normalization, zero_module, timestep_embedding, cosine_beta_schedule, extract, grad_filter, \
+    noise_generator
+
 
 # EMA 是 "Exponential Moving Average"（指数滑动平均）的缩写,它常用于模型参数的平滑更新，比如在训练神经网络时，用 EMA 来得到更加稳定的模型版本，有助于提升泛化能力。
 class EMA():
@@ -294,14 +302,14 @@ class UNet(nn.Module):
             SiLU(),
             zero_module(conv_nd(dims, input_ch, out_channels, 3, padding=1)),
         )
-        
+
     # def convert_to_fp16(self):
     #     """
     #     Convert the torso of the model to float16.
     #     """
     #     self.input_blocks.apply(convert_module_to_f16)
     #     self.output_blocks.apply(convert_module_to_f16)
-    # 
+    #
     # def convert_to_fp32(self):
     #     """
     #     Convert the torso of the model to float32.
