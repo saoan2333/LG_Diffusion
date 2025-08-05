@@ -895,7 +895,7 @@ def lanczos3(x):
             * (abs(x) < 3))
 
 
-def linear(x):
+def linear_c(x):
     return (x + 1) * ((-1 <= x) & (x < 0)) + (1 - x) * ((0 <= x) & (x <= 1))
 
 def contributions(in_length, out_length, scale, kernel, kernel_width, antialiasing):
@@ -992,7 +992,7 @@ def imresize_in(im, scale_factor=None, output_shape=None, kernel=None, antialias
         "lanczos2": (lanczos2, 4.0),
         "lanczos3": (lanczos3, 6.0),
         "box": (box, 1.0),
-        "linear": (linear, 2.0),
+        "linear": (linear_c, 2.0),
         None: (cubic, 4.0)  # set default interpolation method as cubic
     }.get(kernel)
 
