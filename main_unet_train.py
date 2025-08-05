@@ -7,24 +7,26 @@ import os
 import math
 from PIL import Image
 import torchvision as tv
-from LGDiffusion import dist_util, logger
-from LGDiffusion.Trainer_UNet import load_data
-from LGDiffusion.Functions import create_named_schedule_sampler
-from LGDiffusion.Functions import (
+from setuptools.sandbox import save_path
+
+from UNetModel import dist_util, logger
+from UNetModel.image_datasets import load_data
+from UNetModel.resample import create_named_schedule_sampler
+from UNetModel.script_util import (
     model_and_diffusion_defaults,
     create_model_and_diffusion,
     args_to_dict,
     add_dict_to_argparser,
     adjust_scales2image
 )
-from LGDiffusion.Trainer_UNet import TrainLoop, parse_resume_step_from_filename
+from UNetModel.train_util import TrainLoop, parse_resume_step_from_filename
 
 
 def main():
     args = create_argparser().parse_args()
 
     dist_util.setup_dist()
-    logger.configure(dir=args.save_dir)
+    logger.configure(dir=os.path.join(save_path, 'logs'))
 
     real = tv.transforms.ToTensor()(Image.open(args.data_dir))[None]
     adjust_scales2image(real, args)
@@ -75,11 +77,11 @@ def main():
 def create_argparser():
     defaults = dict(
         data_dir="",
+        save_path='./output',
         schedule_sampler="uniform",
         lr=1e-4,
         weight_decay=0.0,
-        save_dir="./checkpoints",
-        lr_anneal_steps=100,
+        lr_anneal_steps=1000,
         num_channels_init=128,
         num_res_blocks_init=6,
         scale_factor_init=0.75,
