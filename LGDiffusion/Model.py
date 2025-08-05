@@ -1,5 +1,5 @@
 
-
+#updata
 from sympy.strategies.branch import condition
 
 from LGDiffusion.Functions import *
