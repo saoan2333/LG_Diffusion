@@ -7,7 +7,6 @@ import os
 import math
 from PIL import Image
 import torchvision as tv
-from setuptools.sandbox import save_path
 
 from UNetModel import dist_util, logger
 from UNetModel.image_datasets import load_data
@@ -26,7 +25,7 @@ def main():
     args = create_argparser().parse_args()
 
     dist_util.setup_dist()
-    logger.configure(dir=os.path.join(save_path, 'logs'))
+    logger.configure(dir=args.save_dir)
 
     real = tv.transforms.ToTensor()(Image.open(args.data_dir))[None]
     adjust_scales2image(real, args)
