@@ -25,7 +25,7 @@ def main():
     args = create_argparser().parse_args()
 
     dist_util.setup_dist()
-    logger.configure(dir=args.save_dir)
+    logger.configure(dir=args.save_path)
 
     real = tv.transforms.ToTensor()(Image.open(args.data_dir))[None]
     adjust_scales2image(real, args)
