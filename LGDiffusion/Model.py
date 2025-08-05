@@ -193,9 +193,9 @@ class UNet(nn.Module):
 
         time_embed_dim = model_channels * 4
         self.time_embed = nn.Sequential(
-            linear(model_channels, time_embed_dim),
+            nn.Linear(model_channels, time_embed_dim),
             SiLU(),
-            linear(time_embed_dim, time_embed_dim),
+            nn.linear(time_embed_dim, time_embed_dim),
         )
 
         if self.num_classes is not None:
