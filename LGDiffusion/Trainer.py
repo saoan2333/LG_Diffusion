@@ -75,7 +75,7 @@ class MutiScaleTrainer(object):
             fp16=False,
             step_start_ema=2000,
             update_ema_every=10,
-            save_and_sample_every=25000,
+            save_and_sample_every=250,
             avg_window=100,
             sched_milestones=None,
             results_folder='./results',
@@ -246,6 +246,8 @@ class MutiScaleTrainer(object):
     ):
         if desc is None:
             desc = f'sample_{str(datetime.datetime.now()).replace(":", "_")}'
+        if self.n_scales == 1 and (custom_t_list is None or len(custom_t_list) == 0):
+            custom_t_list = []
         if self.ema_model.reblurring:
             desc = desc + '_rblr'
         if self.ema_model.sample_limited_t:
