@@ -110,6 +110,11 @@ class Net(nn.Module):
         self.l3 = ConvbBlock(dim, dim, time_emb_dim=time_dim)
         self.l4 = ConvbBlock(dim, half_dim, time_emb_dim=time_dim)
 
+        self.r1 = ConvbBlock(half_dim + dim, dim, time_emb_dim=time_dim)
+        self.r2 = ConvbBlock(dim + dim, dim, time_emb_dim=time_dim)
+        self.r3 = ConvbBlock(dim + half_dim, half_dim, time_emb_dim=time_dim)
+        self.r4 = ConvbBlock(half_dim + channels, half_dim, time_emb_dim=time_dim)
+
         out_dim = default(out_dim, channels)
         self.final_conv = nn.Sequential(
             nn.Conv2d(half_dim, out_dim, kernel_size=1)
@@ -126,12 +131,21 @@ class Net(nn.Module):
             t = self.time_mlp(time) if exists(self.time_mlp) else None
             cond_vec = t
 
-        x= self.l1(x, cond_vec)
-        x = self.l2(x, cond_vec)
-        x = self.l3(x, cond_vec)
-        x = self.l4(x, cond_vec)
+        l1= self.l1(x, cond_vec)
+        l2 = self.l2(l1, cond_vec)
+        l3 = self.l3(l2, cond_vec)
+        l4 = self.l4(l3, cond_vec)
 
-        return self.final_conv(x)
+        r1_in = torch.cat([l4, l3], dim=1)
+        r1 = self.r1(r1_in, cond_vec)
+        r2_in = torch.cat([r1, l2], dim=1)
+        r2 = self.r2(r2_in, cond_vec)
+        r3_in = torch.cat([r2, l1], dim=1)
+        r3 = self.r3(r3_in, cond_vec)
+        r4_in = torch.cat([r3, x], dim=1)
+        r4 = self.r4(r4_in, cond_vec)
+
+        return self.final_conv(r4)
 
 # 模型结构定义
 
