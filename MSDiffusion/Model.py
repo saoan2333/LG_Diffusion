@@ -1,6 +1,6 @@
 from sympy.strategies.branch import condition
 
-from LGDiffusion.Functions import *
+from MSDiffusion.Functions import *
 import math
 from torch import nn
 from einops import rearrange
@@ -197,7 +197,6 @@ class Diffusion(nn.Module):
 
         # 采样方式一:CLIP
         # Clip采样用的属性
-        self.clip_guided_sampling = False
         self.guidance_sub_iters = None
         self.stop_guidance = None
         self.quantile = 0.8
@@ -216,18 +215,18 @@ class Diffusion(nn.Module):
         # omega参数用于在采样时添加随机性,即模型是否完全根据学到的内容来采样的程度
         self.omega = omega
 
-        # 在Clip采样时指定ROI, ROI（Region of Interest） 指的是 感兴趣区域
-        self.clip_roi_bb = []
-
-        # 采样方式二:ROI
-        # ROI引导采样
-        self.roi_guided_sampling = False
-        # ROI区域位置信息标记 [y,x,h,w]
-        self.roi_bbs = []
-        # ROI区域的信息统计 [mean_tensor[1,3,1,1], std_tensor[1,3,1,1]]
-        self.roi_bbs_stat = []
-        # 特定区域的patch指定
-        self.roi_target_patch = []
+        # # 在Clip采样时指定ROI, ROI（Region of Interest） 指的是 感兴趣区域
+        # self.clip_roi_bb = []
+        #
+        # # 采样方式二:ROI
+        # # ROI引导采样
+        # self.roi_guided_sampling = False
+        # # ROI区域位置信息标记 [y,x,h,w]
+        # self.roi_bbs = []
+        # # ROI区域的信息统计 [mean_tensor[1,3,1,1], std_tensor[1,3,1,1]]
+        # self.roi_bbs_stat = []
+        # # 特定区域的patch指定
+        # self.roi_target_patch = []
 
         # 反转图片的x与y，为了对齐pytorch的图像张量格式[batch_size, channels, height, width]
         for i in range(n_scales):
@@ -304,18 +303,6 @@ class Diffusion(nn.Module):
             gammas[i, :] = (torch.tensor(sigma_t, device=self.device) / (loss_factor * scale_losses[i])).clamp(min=0, max=1)
         self.register_buffer('gammas', gammas)
 
-    # ROI采样
-    # patch融合函数, eta参数控制融合程度.
-    # 计算方式出自SinDDM
-    def roi_patch_modification(self, x_recon, scale=0, eta=0.8):
-        x_modified = x_recon
-        for bb in self.roi_bbs:
-            bb = [int(bb_i / np.power(self.scale_factor, self.n_scales - scale - 1)) for bb_i in bb]
-            bb_y, bb_x, bb_h, bb_w = bb
-            target_patch_resize = F.interpolate(self.roi_target_patch[scale], size=(bb_h, bb_w))
-            x_modified[:, :, bb_y:bb_y + bb_h, bb_x:bb_x + bb_w] = eta * target_patch_resize + (
-                        1 - eta) * x_modified[:, :, bb_y:bb_y + bb_h, bb_x:bb_x + bb_w]
-        return x_modified
 
     # 计算正向扩散时xt的mean与std
     def q_mean_variance(self, x_start, t):
@@ -451,9 +438,9 @@ class Diffusion(nn.Module):
             plt.savefig(str(self.results_folder / 'clip_score'))
             plt.clf()
 
-        # ROI引导采样
-        elif self.roi_guided_sampling and (s < self.n_scales-1):
-            x_recon = self.roi_patch_modification(x_recon, scale=s)
+        # # ROI引导采样
+        # elif self.roi_guided_sampling and (s < self.n_scales-1):
+        #     x_recon = self.roi_patch_modification(x_recon, scale=s)
 
         # 无引导采样
         if int(s) > 0 and t[0] > 0 and self.reblurring:

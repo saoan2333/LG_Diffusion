@@ -3,8 +3,8 @@ import os
 import datetime
 from functools import partial
 
-from LGDiffusion.Functions import *
-from LGDiffusion.Model import EMA
+from MSDiffusion.Functions import *
+from MSDiffusion.Model import EMA
 
 from torch.utils import data
 from torchvision import transforms, utils
@@ -13,18 +13,10 @@ from torch.optim.lr_scheduler import MultiStepLR
 
 from matplotlib import pyplot as plt
 from skimage.exposure import match_histograms
-from text2live_util.util import get_augmentations_template
 from tqdm import tqdm
 
-# from Functions import AMP
 
-# # 待更新
-# try:
-#     from torch.cuda import amp
-#
-#     AMP_AVAILABLE = True
-# except:
-#     AMP_AVAILABLE = False
+
 
 
 # 数据集class， datasets
@@ -397,158 +389,4 @@ class MutiScaleTrainer(object):
             for b in range(batch_size):
                 utils.save_image(final_img[b], os.path.join(final_results_folder ,input_file + f'_out_b{b}_i2i.png'))
 
-    def clip_sampling(
-            self,
-            clip_model,
-            text_input,
-            strength,
-            sample_batch_size,
-            custom_t_list=None,
-            guidance_sub_iters=None,
-            quantile=0.8,
-            stop_guidance=None,
-            save_unbatched=False,
-            scale_mul=(1, 1),
-            llambda=0,
-            start_noise=True,
-            image_name=''
-    ):
-        if guidance_sub_iters is None:
-            guidance_sub_iters = [*reversed(range(self.n_scales))]
-        self.ema_model.clip_strength = strength
-        self.ema_model.clip_text = text_input
-        self.ema_model.text_embedds_hr = clip_model.get_text_embedding(text_input, template=get_augmentations_template('hr'))
-        self.ema_model.text_embedds_lr = clip_model.get_text_embedding(text_input, template=get_augmentations_template('lr'))
-        self.ema_model.clip_guided_sampling = True
-        self.ema_model.guidance_sub_iters = guidance_sub_iters
-        self.ema_model.quantile = quantile
-        self.ema_model.stop_guidance = stop_guidance
-        self.ema_model.clip_model = clip_model
-        self.ema_model.clip_score = []
-        self.ema_model.llambda = llambda
-        strength_string = f'{strength}'
-        gsi_string = '_'.join(str(e) for e in guidance_sub_iters)
-        n_aug = self.ema_model.clip_model.cfg["n_aug"]
-        desc = f"clip_{text_input.replace(' ', '_')}_n_aug{n_aug}_str_" + strength_string + "_gsi_" + gsi_string + \
-               f'_ff{1-quantile}' + f'_{str(datetime.datetime.now()).replace(":", "_")}'
-
-        if not start_noise: # mode==clip_style_trans
-            custom_scales = [self.n_scales - 2, self.n_scales - 1]
-            custom_image_size_idxs = [self.n_scales - 2, self.n_scales - 1]
-            self.sample_scales(scale_mul=scale_mul,
-                               custom_sample=True,
-                               custom_scales=custom_scales,
-                               custom_image_size_idxs=custom_image_size_idxs,
-                               image_name=image_name,
-                               batch_size=sample_batch_size,
-                               custom_t_list=custom_t_list,
-                               desc=desc,
-                               save_unbatched=save_unbatched,
-                               start_noise=start_noise,
-                               )
-        else:  # mode==clip_style_gen or clip_content
-            self.sample_scales(scale_mul=scale_mul,  # H,W
-                               custom_sample=False,
-                               image_name='',
-                               batch_size=sample_batch_size,
-                               custom_t_list=custom_t_list,
-                               desc=desc,
-                               save_unbatched=save_unbatched,
-                               start_noise=start_noise,
-                               )
-        self.ema_model.clip_guided_sampling = False
-
-    def roi_sampling(
-            self,
-            custom_t_list=None,
-            target_roi=None,
-            roi_bb_list=None,
-            save_unbatched=False,
-            batch_size=4,
-            scale_mul=(1, 1)
-    ):
-        self.ema_model.roi_guided_sampling = True
-        self.ema_model.roi_bbs = roi_bb_list
-        target_bb = target_roi
-        # create a corresponding downsampled patch for each scale
-        for scale in range(self.n_scales):
-            target_bb_rescaled = [int(bb_i / np.power(self.scale_factor, self.n_scales - scale - 1)) for bb_i in target_bb]
-            self.ema_model.roi_target_patch.append(extract_img(self.data_list[scale][0][0][None, :,:,:], target_bb_rescaled))
-
-        self.sample_scales(scale_mul=scale_mul,  # H,W
-                           custom_sample=False,
-                           image_name='',
-                           batch_size=batch_size,
-                           custom_t_list=custom_t_list,
-                           desc=f'roi_{str(datetime.datetime.now()).replace(":", "_")}',
-                           save_unbatched=save_unbatched,
-                           start_noise=True,
-                           )
-        self.ema_model.roi_guided_sampling = False
-
-    def clip_roi_sampling(
-            self,
-            clip_model,
-            text_input,
-            strength,
-            sample_batch_size,
-            num_clip_iters=100,
-            num_denoising_steps=2,
-            clip_roi_bb=None,
-            save_unbatched=False
-    ):
-        text_embedds = clip_model.get_text_embedding(text_input, template=get_augmentations_template('lr'))
-        strength_string = f'{strength}'
-        n_aug = clip_model.cfg["n_aug"]
-        desc = f"clip_roi_{text_input.replace(' ', '_')}_n_aug{n_aug}_str_" + strength_string + "_n_iters_" + str(num_clip_iters) + \
-               f'_{str(datetime.datetime.now()).replace(":", "_")}'
-        image = self.data_list[self.n_scales-1][0][0][None,:,:,:]
-        image = image.repeat(sample_batch_size, 1, 1, 1)
-
-        image_roi = image[:,:,clip_roi_bb[0]:clip_roi_bb[0]+clip_roi_bb[2],clip_roi_bb[1]:clip_roi_bb[1]+clip_roi_bb[3]].clone()
-
-        image_roi.requires_grad_(True)
-        image_roi_renorm = (image_roi + 1) * 0.5
-        interm_results_folder = Path(str(self.ema_model.results_folder / f'interm_samples_clip_roi'))
-        interm_results_folder.mkdir(parents=True, exist_ok=True)
-        for i in tqdm(range(num_clip_iters)):
-            clip_model.zero_grad()
-            score = -clip_model.calculate_clip_loss(image_roi_renorm, text_embedds)
-            clip_grad = torch.autograd.grad(score, image_roi, create_graph=False)[0]
-            if self.ema_model.save_interm:
-                utils.save_image((image_roi.clamp(-1., 1.) + 1) * 0.5,
-                                 str(interm_results_folder / f'iter_{i}.png'),
-                                 nrow=4)
-
-            image_roi_prev_norm = torch.linalg.vector_norm(image_roi, dim=(1, 2, 3), keepdim=True)
-            division_norm = torch.linalg.vector_norm(image_roi, dim=(1,2,3), keepdim=True) / torch.linalg.vector_norm(
-                clip_grad, dim=(1,2,3), keepdim=True)
-            image_roi_prev = image_roi
-            image_roi = image_roi_prev + strength* division_norm * clip_grad
-            image_roi_norm = torch.linalg.vector_norm(image_roi, dim=(1, 2, 3), keepdim=True)
-            keep_norm = False
-            if keep_norm:
-                image_roi = image_roi * ((image_roi_prev_norm) / (image_roi_norm))
-
-            image_roi.clamp_(-1., 1.)
-            image_roi_renorm = (image_roi + 1) * 0.5
-
-        # insert patch into original image
-        image[:, :, clip_roi_bb[0]:clip_roi_bb[0] + clip_roi_bb[2],clip_roi_bb[1]:clip_roi_bb[1] + clip_roi_bb[3]] = image_roi
-        #
-        final_image = self.ema_model.sample_via_scale(sample_batch_size,
-                                                      image,
-                                                      s=self.n_scales-1,
-                                                      custom_t=num_denoising_steps,
-                                                      scale_mul=(1,1))
-        final_img_renorm = (final_image + 1) * 0.5
-        final_results_folder = Path(str(self.ema_model.results_folder / f'final_samples'))
-        final_results_folder.mkdir(parents=True, exist_ok=True)
-        utils.save_image(final_img_renorm, str(final_results_folder / (desc + '.png')), nrow=4)
-
-        if save_unbatched:
-            final_results_folder = Path(str(self.results_folder / f'final_samples_unbatched_{desc}'))
-            final_results_folder.mkdir(parents=True, exist_ok=True)
-            for b in range(sample_batch_size):
-                utils.save_image(final_img_renorm[b], os.path.join(final_results_folder, f'{desc}_out_b{b}.png'))
 

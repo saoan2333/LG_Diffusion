@@ -5,17 +5,16 @@ import os
 import torchvision
 from fsspec.registry import default
 
-from LGDiffusion.Functions import muti_scales_img
-from LGDiffusion.Model import Net, Diffusion
-from LGDiffusion.Trainer import MutiScaleTrainer
-from text2live_util.clip_extractor import ClipExtractor
+from MSDiffusion.Functions import muti_scales_img
+from MSDiffusion.Model import Net, Diffusion
+from MSDiffusion.Trainer import MutiScaleTrainer
 # python main.py  --mode train --timesteps 10 --train_num_steps 10 --avg_window 1 --save_and_sample_every 5 --AMP --SinScale --step_start_ema 10
 def main():
 
     parser = argparse.ArgumentParser()
 
     parser.add_argument("--scope", help='choose training mark num.', default='pyramids')
-    parser.add_argument("--mode", help='choose mode: train, sample, clip_content, clip_style_gen, clip_style_trans, clip_roi, harmonization, style_transfer, roi')
+    parser.add_argument("--mode", help='choose mode: train, sample')
     parser.add_argument("--input_image", help='content image for style transfer or harmonization.',
                         default='seascape_composite_dragon.png')
     parser.add_argument("--start_t_harm", help='default=5, starting T at last scale for harmonization', default=5, type=int)
@@ -23,15 +22,6 @@ def main():
 
     # 图像嵌入（harmonization）时需要的输入，融合图像的掩码mask
     parser.add_argument("--harm_mask", help='harmonization mask.', default='seascape_mask_dragon.png')
-
-    # CLIP指导时需要输入的参数。可删除，只保留ROI
-    parser.add_argument("--clip_text", help='enter CLIP text.', default='Fire in the Forest')
-    parser.add_argument("--fill_factor",
-                        help='Dictates relative amount of pixels to be changed. Should be between 0 and 1.', type=float)
-    parser.add_argument("--strength",
-                        help='Dictates the relative strength of CLIPs gradients. Should be between 0 and 1.',
-                        type=float)
-    parser.add_argument("--roi_n_tar", help='Defines the number of target ROIs in the new image.', default=1, type=int)
 
     # Dataset
     parser.add_argument("--dataset_folder", help='choose dataset folder.', default='./datasets/pyramids/')
@@ -108,12 +98,6 @@ def main():
     )
     model.to(device)
 
-    # model = UNet(
-    #     model_channels=160,
-    #     in_channels=3,
-    #     num_classes=3,
-    # )
-    # model.to(device)
 
     diffusion = Diffusion(
         denoise_net=model,

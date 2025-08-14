@@ -7,7 +7,7 @@
 """
 
 import torch
-from LGDiffusion.Functions import AMP   # 你的 AMP 封装
+from MSDiffusion.Functions import AMP   # 你的 AMP 封装
 
 # ──────────────────────────────────────────────────────────────── #
 # 1) 准备一个极简 CNN                                            #
