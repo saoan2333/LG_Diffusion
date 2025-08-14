@@ -195,38 +195,10 @@ class Diffusion(nn.Module):
 
         self.img_prev_upsample = None
 
-        # 采样方式一:CLIP
-        # Clip采样用的属性
-        self.guidance_sub_iters = None
-        self.stop_guidance = None
-        self.quantile = 0.8
-        self.clip_model = None
-        self.clip_strength = None
-        self.clip_text = ''
-        self.text_embedds = None
-        self.text_embedds_hr = None
-        self.text_embedds_lr = None
-        self.clip_text_features = None
-        self.clip_score = []
-        self.clip_mask = None
-        self.llambda = 0
-        self.x_recon_prev = None
 
         # omega参数用于在采样时添加随机性,即模型是否完全根据学到的内容来采样的程度
         self.omega = omega
 
-        # # 在Clip采样时指定ROI, ROI（Region of Interest） 指的是 感兴趣区域
-        # self.clip_roi_bb = []
-        #
-        # # 采样方式二:ROI
-        # # ROI引导采样
-        # self.roi_guided_sampling = False
-        # # ROI区域位置信息标记 [y,x,h,w]
-        # self.roi_bbs = []
-        # # ROI区域的信息统计 [mean_tensor[1,3,1,1], std_tensor[1,3,1,1]]
-        # self.roi_bbs_stat = []
-        # # 特定区域的patch指定
-        # self.roi_target_patch = []
 
         # 反转图片的x与y，为了对齐pytorch的图像张量格式[batch_size, channels, height, width]
         for i in range(n_scales):
@@ -376,71 +348,6 @@ class Diffusion(nn.Module):
             utils.save_image(final_img,
                              str(final_results_folder / f'denoised_t-{t[0]:03}_s-{s}.png'),
                              nrow=4)
-        # CLIP引导采样
-        if self.clip_guided_sampling and (self.stop_guidance <= t[0] or s < self.n_scales - 1) and self.guidance_sub_iters[s] > 0:
-            if clip_denoised:
-                x_recon.clamp_(-1., 1.)
-
-            # 确保 CLIP 引导的图像修改效果在不同子步骤间逐步融合、平滑过渡，同时开启自动微分以继续优化图像。
-            if self.clip_mask is not None:
-                x_recon = x_recon * (1 - self.clip_mask) + (
-                        (1 - self.llambda) * self.x_recon_prev + self.llambda * x_recon) * self.clip_mask
-            # 开启自动微分(auto-diff)
-            x_recon.requires_grad_(True)
-
-            x_recon_renorm = (x_recon + 1) * 0.5
-            for i in range(self.guidance_sub_iters[s]):
-                self.clip_model.zero_grad()
-                # 根据当前图像的尺度s选择引导方式,s>0高分辨率文本引导, 否则低分辨率文本嵌入.
-                if s > 0:
-                    score = -self.clip_model.calculate_clip_loss(x_recon_renorm, self.text_embedds_hr)
-                else:
-                    score = -self.clip_model.calculate_clip_loss(x_recon_renorm, self.text_embedds_lr)
-
-                clip_grad = torch.autograd.grad(score, x_recon, create_graph=False)[0]
-
-                # 根据梯度的强度，创建一个“CLIP引导的掩码区域”,使模型更关注被标注的这个mask区域
-                if self.clip_mask is None:
-                    clip_grad, clip_mask = grad_filter(grad=clip_grad, quantile=self.quantile)
-                    self.clip_mask = clip_mask.float()
-
-                if self.save_history:
-                    final_results_folder = Path(str(self.output_folder / f'mid-samples_scale_{s}'))
-                    final_results_folder.mkdir(parents=True, exist_ok=True)
-                    final_mask = self.clip_mask.type(torch.float64)
-
-                    utils.save_image(final_mask,
-                                     str(final_results_folder / f'clip_mask_s-{s}.png'),
-                                     nrow=4)
-                    utils.save_image((x_recon.clamp(-1., 1.) + 1) * 0.5,
-                                     str(final_results_folder / f'clip_out_s-{s}_t-{t[0]}_subiter_{i}.png'),
-                                     nrow=4)
-
-                # 梯度归一化,normalize gradients
-                division_norm = torch.linalg.vector_norm(x_recon * self.clip_mask, dim=(1,2,3), keepdim=True) / torch.linalg.vector_norm(
-                    clip_grad * self.clip_mask, dim=(1,2,3), keepdim=True)
-
-                # 基于CLIP更新x
-                x_recon += self.clip_strength * division_norm * clip_grad * self.clip_mask
-                x_recon.clamp_(-1., 1.)
-
-                # 将图像转换到[0, 1]以用于下一次迭代的计算
-                x_recon_renorm = (x_recon + 1) * 0.5
-                # 保存本次迭代的CLip相似性得分,detach() 是为了断开 autograd 链条，不再反向传播；
-                self.clip_score.append(score.detach().cpu())
-
-            self.x_recon_prev = x_recon.detach()
-
-            # Clip loss可视化
-            plt.rcParams['figure.figsize'] = [16, 8]
-            plt.plot(self.clip_score)
-            plt.grid(True)
-            plt.savefig(str(self.results_folder / 'clip_score'))
-            plt.clf()
-
-        # # ROI引导采样
-        # elif self.roi_guided_sampling and (s < self.n_scales-1):
-        #     x_recon = self.roi_patch_modification(x_recon, scale=s)
 
         # 无引导采样
         if int(s) > 0 and t[0] > 0 and self.reblurring:
@@ -448,10 +355,6 @@ class Diffusion(nn.Module):
                         (1 - extract(cur_gammas, t - 1, x_recon.shape)) * x_recon
         else:
             x_tm1_mix = x_recon
-
-        if clip_denoised:
-            x_tm1_mix.clamp_(-1., 1.)
-            x_t_mix.clamp_(-1., 1.)
 
         model_mean, posterior_variance, posterior_log_variance = self.q_posterior(x_start=x_tm1_mix, x_t_mix=x_t_mix,
                                                                                   x_t=x, t=t, s=s,
