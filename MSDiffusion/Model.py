@@ -449,13 +449,6 @@ class Diffusion(nn.Module):
                              str(final_results_folder / f'noisy_input_s_{s}.png'),
                              nrow=4)
 
-        if self.clip_mask is not None:
-            if s > 0:
-                mul_size = [int(self.image_sizes[s][0]* self.scale_mul[0]), int(self.image_sizes[s][1]* self.scale_mul[1])]
-                self.clip_mask = F.interpolate(self.clip_mask, size=mul_size, mode='bilinear')
-                self.x_recon_prev = F.interpolate(self.x_recon_prev, size=mul_size, mode='bilinear')
-            else:
-                self.clip_mask = None
 
         if self.sample_limited_t and s < (self.n_scales - 1):
             t_min = self.num_timesteps_ideal[s + 1]
